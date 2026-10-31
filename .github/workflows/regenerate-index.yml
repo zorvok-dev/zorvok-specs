@@ -1,0 +1,40 @@
+name: Regenerate index
+
+# Rebuilds all_pods.txt / all_pods_versions.txt from the Specs/ tree
+# after every merge to main, and commits the result if it changed — the
+# static equivalent of zorvok-registry/cdn computing the same files from
+# the live store on every request (zorvok ADR 0006/0009).
+#
+# NOTE: like validate-pr.yml, this workflow's YAML wiring is untested
+# against real GitHub Actions in this session; scripts/generate-index.sh
+# itself has been tested locally.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Specs/**"
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate index files
+        run: |
+          chmod +x scripts/generate-index.sh
+          scripts/generate-index.sh
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- all_pods.txt all_pods_versions.txt; then
+            git add all_pods.txt all_pods_versions.txt
+            git commit -m "Regenerate index files"
+            git push
+          fi

@@ -1,0 +1,32 @@
+name: Validate publish PR
+
+# Enforces this repo's publishing rules (zorvok ADR 0009) on every PR —
+# immutability, podspec structure, and ownership — the GitHub-native
+# stand-in for registry-server's database constraints and auth checks.
+# See scripts/validate-pr.sh for the actual logic; this workflow just
+# wires it to the PR's base/head refs and the PR author's identity.
+#
+# NOTE: this workflow file itself has not been run against real GitHub
+# Actions in this session (no push/Actions access available) — only
+# scripts/validate-pr.sh's own logic has been tested locally, against
+# real git repos, with real pass/fail scenarios. Verify this YAML's
+# wiring (checkout depth, ref resolution) on the first real PR before
+# relying on it.
+
+on:
+  pull_request:
+    paths:
+      - "Specs/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate publishing rules
+        run: |
+          chmod +x scripts/validate-pr.sh
+          scripts/validate-pr.sh "origin/${{ github.base_ref }}" "${{ github.sha }}" "${{ github.actor }}"
