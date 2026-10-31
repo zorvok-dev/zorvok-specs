@@ -1,13 +1,13 @@
 # specs
 
 Zorvok's official public package registry — **Tier 2** of Zorvok's three-tier registry model, see
-[zorvok ADR 0009](https://github.com/zorvok-dev/zorvok/blob/main/docs/adr/0009-three-tier-registry-model.md).
+[zorvok ADR 0009](https://github.com/zorvok-dev/zorvok-ios/blob/main/docs/adr/0009-three-tier-registry-model.md).
 
 Unlike `zorvok-registry` (a live server, for private/enterprise use), this is just files in git, served free via GitHub Pages (or even just a plain `git clone`/`raw.githubusercontent.com`) — Zorvok's own public registry costs nothing to run.
 
 ## Format
 
-Identical to the real CocoaPods CDN protocol, already implemented against and tested in [`zorvok-registry/cdn`](https://github.com/zorvok-dev/zorvok-registry/tree/main/cdn):
+Identical to the real CocoaPods CDN protocol, already implemented against and tested in [`zorvok-registry/cdn`](https://github.com/zorvok-dev/zorvok-registry-ios/tree/main/cdn):
 
 ```
 CocoaPods-version.yml       # min/last/prefix_lengths (prefix_lengths: [] — no sharding; this registry is nowhere near cdn.cocoapods.org's scale)
@@ -37,10 +37,10 @@ The actual validation logic lives in `scripts/validate-pr.sh` and `scripts/gener
 ## Using this registry
 
 ```bash
-zorvok install --native --source https://zorvok-dev.github.io/specs/
+zorvok install --native --source https://zorvok-dev.github.io/zorvok-specs/
 # or, once registry_url is configured, automatically (zorvok ADR 0008):
-zorvok config set registry_url https://zorvok-dev.github.io/specs/ --global
+zorvok config set registry_url https://zorvok-dev.github.io/zorvok-specs/ --global
 zorvok install --native
 ```
 
-See [zorvok-dev/zorvok](https://github.com/zorvok-dev/zorvok) for the CLI.
+See [zorvok-dev/zorvok-ios](https://github.com/zorvok-dev/zorvok-ios) for the CLI.
