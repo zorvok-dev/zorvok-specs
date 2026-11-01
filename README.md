@@ -20,7 +20,7 @@ Zorvok resolves dependencies from any CocoaPods-compatible source, with no speci
 | 2 | **This repository** — Zorvok's free public registry | The Zorvok project, as static files in git | Free (GitHub-hosted) |
 | 3 | [zorvok-registry-ios](https://github.com/zorvok-dev/zorvok-registry-ios) — a self-hostable registry server | You, for a private/enterprise registry | Whatever you host it on |
 
-This split (full rationale in [zorvok ADR 0009](https://github.com/zorvok-dev/zorvok-ios/blob/main/docs/adr/0009-three-tier-registry-model.md)) is deliberately analogous to Maven Central + a self-hosted Nexus/Artifactory: one free shared public index, plus the option to run your own for anything that shouldn't be public. From the client's point of view, all three are just a `source` URL — `zorvok install` (or plain `pod install`) doesn't know or care whether what answers at that URL is CocoaPods' CDN, this git repository, or a running Go server.
+This split is deliberately analogous to Maven Central + a self-hosted Nexus/Artifactory: one free shared public index, plus the option to run your own for anything that shouldn't be public. From the client's point of view, all three are just a `source` URL — `zorvok install` (or plain `pod install`) doesn't know or care whether what answers at that URL is CocoaPods' CDN, this git repository, or a running Go server.
 
 ## Repository layout
 
@@ -60,7 +60,7 @@ zorvok install --native
 zorvok install --native --no-registry
 ```
 
-`--native` is required to use an extra source: Zorvok's default, delegated `zorvok install` is a drop-in `pod install`, and `pod install` itself has no mechanism to resolve from a source that isn't declared in the Podfile (confirmed against real CocoaPods before this design was settled — see [ADR 0004](https://github.com/zorvok-dev/zorvok-ios/blob/main/docs/adr/0004-federation-requires-podfile-source-line.md)). `zorvok install --native` drives CocoaPods' own installer directly and can inject an extra source in memory, without ever writing to your Podfile.
+`--native` is required — plain `pod install` can't resolve a source that isn't declared in the Podfile (see [docs/adr/0004](https://github.com/zorvok-dev/zorvok-ios/blob/main/docs/adr/0004-federation-requires-podfile-source-line.md)). `zorvok install --native` drives CocoaPods' own installer directly and can inject an extra source in memory, without ever writing to your Podfile.
 
 > **GitHub Pages note:** this repository is laid out to be served from `https://zorvok-dev.github.io/zorvok-specs/` once GitHub Pages is enabled for it (repo Settings → Pages → Deploy from branch, `main` / `/ (root)`) — at that point the Pages URL and the `raw.githubusercontent.com` URL above are interchangeable. Until Pages is turned on, use the `raw.githubusercontent.com` URL shown above; it works today and needs no setup.
 
