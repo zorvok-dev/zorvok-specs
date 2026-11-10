@@ -36,6 +36,7 @@ Specs/
 scripts/
   validate-pr.sh              # enforces immutability/structure/ownership on every publish PR
   generate-index.sh           # rebuilds all_pods.txt / all_pods_versions.txt from the Specs/ tree
+  test-validate-pr.sh         # repeatable local test harness for validate-pr.sh (run it: no setup needed)
 .github/workflows/
   validate-pr.yml             # runs validate-pr.sh on every PR touching Specs/
   regenerate-index.yml        # runs generate-index.sh after every merge, commits the result
@@ -106,7 +107,7 @@ There is no server, so there is no `zorvok trunk push` against this registry yet
    - **Ownership** — if `Specs/<PodName>/OWNERS` already exists (as of the PR's base commit, not the PR's own diff), your GitHub username must already be listed in it. You cannot add yourself to `OWNERS` and publish a new version of someone else's pod in the same PR.
 5. **On merge**, `regenerate-index.yml` rebuilds `all_pods.txt`/`all_pods_versions.txt` from the current `Specs/` tree and commits the result automatically — you don't update those files yourself.
 
-`scripts/validate-pr.sh`'s logic has been exercised locally against real git repositories and real pass/fail scenarios: a valid first publish, a valid update by an existing owner, a rejected non-owner publish, a rejected ownership-hijack attempt (adding yourself to `OWNERS` in the same PR as a publish), a rejected immutability violation, a rejected name/version mismatch, and a rejected malformed-JSON podspec. The GitHub Actions YAML wiring itself (`validate-pr.yml`/`regenerate-index.yml`) has not yet been exercised against a real PR on `github.com` — if you're the first to publish here, watch the Actions run on your PR and report anything unexpected.
+`scripts/validate-pr.sh`'s logic is exercised against real git repositories and real pass/fail scenarios by `scripts/test-validate-pr.sh` — run it yourself any time with no setup (`scripts/test-validate-pr.sh`): a valid first publish, a valid update by an existing owner, a rejected non-owner publish, a rejected ownership-hijack attempt (adding yourself to `OWNERS` in the same PR as a publish), a rejected immutability violation, a rejected name/version mismatch, and a rejected malformed-JSON podspec. The GitHub Actions YAML wiring itself (`validate-pr.yml`/`regenerate-index.yml`) has not yet been exercised against a real PR on `github.com` — if you're the first to publish here, watch the Actions run on your PR and report anything unexpected.
 
 ## Relationship to the rest of Zorvok
 
