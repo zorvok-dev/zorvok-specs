@@ -1,0 +1,114 @@
+name: Publish
+
+# The public registry's stand-in for trunk.cocoapods.org (zorvok ADR 0010).
+# `zorvok trunk push` opens a pull request from the publisher's fork that
+# adds Specs/<name>/<version>/<name>.podspec.json, plus Specs/<name>/OWNERS
+# for a brand-new pod. This workflow is the only thing with write access to
+# this repository, and it decides what happens to that pull request with no
+# human in the loop:
+#
+#   1. scripts/validate-pr.sh: immutability, structure and ownership. A pull
+#      request that breaks these is rejected.
+#   2. scripts/publish-policy.sh: whether it's a change a machine should
+#      merge on its own. One that isn't (a name that already exists on
+#      CocoaPods trunk, a change to anything other than new podspecs, ...)
+#      waits for a maintainer.
+#
+# A pull request that passes both is merged here, and the index files are
+# regenerated in the same job, since a merge made with this workflow's token
+# doesn't trigger regenerate-index.yml. Every run ends with a comment whose
+# first line is a machine-readable verdict on the exact commit it judged;
+# `zorvok trunk push` waits for that comment.
+#
+# Security: pull_request_target runs with this repository's write token, so
+# nothing from the pull request may ever run. The job checks out the base
+# branch, copies its scripts aside before touching anything else, fetches
+# the pull request's commits as data only, and runs only those copies, which
+# only read files out of git (git show / git diff / jq). Nothing from the
+# pull request is interpolated into a script either: every value reaches
+# the shell through env.
+#
+# NOTE: like regenerate-index.yml, this YAML hasn't run on real GitHub
+# Actions yet; the scripts it calls are tested locally
+# (scripts/test-validate-pr.sh, scripts/test-publish-policy.sh). Watch the
+# first real publish's run.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "Specs/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run per pull request at a time; a newer push to it replaces a run
+# still in progress. Different pull requests run side by side: merges are
+# atomic on GitHub's side, and push-index.sh retries when two land at once.
+concurrency:
+  group: publish-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      AUTHOR: ${{ github.event.pull_request.user.login }}
+      BASE: ${{ github.event.pull_request.base.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Judge, then publish or explain
+        id: judge
+        run: |
+          tools="$RUNNER_TEMP/registry-scripts"
+          mkdir -p "$tools"
+          cp scripts/validate-pr.sh scripts/publish-policy.sh scripts/generate-index.sh scripts/push-index.sh "$tools/"
+          chmod +x "$tools"/*.sh
+
+          git fetch -q --no-tags origin "pull/$PR/head:refs/remotes/pr/head"
+          if [ "$(git rev-parse refs/remotes/pr/head)" != "$HEAD_SHA" ]; then
+            echo "A newer commit has been pushed to this pull request; its own run judges it."
+            exit 0
+          fi
+          merge_base="$(git merge-base "origin/$BASE" "$HEAD_SHA")"
+
+          verdict=published
+          details="Published. It can take up to 5 minutes to show up everywhere."
+          if ! out="$("$tools/validate-pr.sh" "$merge_base" "$HEAD_SHA" "$AUTHOR" 2>&1)"; then
+            verdict=rejected
+            details="$out"
+          elif ! out="$("$tools/publish-policy.sh" "$merge_base" "$HEAD_SHA" 2>&1)"; then
+            verdict=needs-review
+            details="$out"
+          elif ! out="$(gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD_SHA" 2>&1)"; then
+            verdict=rejected
+            details="It couldn't be merged automatically: $out"
+          elif ! out="$("$tools/push-index.sh" "$BASE" "$GITHUB_WORKSPACE" 2>&1)"; then
+            verdict=needs-review
+            details="It was merged, but the index files couldn't be regenerated, so it isn't installable yet. A maintainer needs to run the Regenerate index workflow. ($out)"
+          fi
+
+          printf '<!-- zorvok-publish sha=%s verdict=%s -->\n%s\n' "$HEAD_SHA" "$verdict" "$details" > "$RUNNER_TEMP/verdict.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+
+      - name: Report an unexpected failure
+        if: failure()
+        run: |
+          printf '<!-- zorvok-publish sha=%s verdict=needs-review -->\nThe publish check failed unexpectedly, so a maintainer needs to look at it: %s\n' \
+            "$HEAD_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/verdict.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
+
+      # A rejected pull request shows a failed check, so it stands out in
+      # the list; its comment above already says why.
+      - name: Fail the check if rejected
+        if: steps.judge.outputs.verdict == 'rejected'
+        run: exit 1

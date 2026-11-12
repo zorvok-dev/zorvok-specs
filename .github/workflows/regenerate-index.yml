@@ -1,22 +1,30 @@
 name: Regenerate index
 
-# Rebuilds all_pods.txt / all_pods_versions.txt from the Specs/ tree
-# after every merge to main, and commits the result if it changed — the
+# Rebuilds all_pods.txt / all_pods_versions.txt from the Specs/ tree after
+# a maintainer merges into main, and commits the result if it changed — the
 # static equivalent of zorvok-registry/cdn computing the same files from
-# the live store on every request (zorvok ADR 0006/0009).
+# the live store on every request (zorvok ADR 0006/0009). Pull requests the
+# publish workflow merges itself get their index regenerated there instead,
+# since a merge made with a workflow's token doesn't trigger this one. Both
+# use scripts/push-index.sh, which retries if they race. Run it by hand
+# (Actions → Regenerate index → Run workflow) to repair a stale index.
 #
-# NOTE: like validate-pr.yml, this workflow's YAML wiring is untested
-# against real GitHub Actions in this session; scripts/generate-index.sh
-# itself has been tested locally.
+# NOTE: like publish.yml, this workflow's YAML wiring is untested against
+# real GitHub Actions; the scripts it calls are tested locally.
 
 on:
   push:
     branches: [main]
     paths:
       - "Specs/**"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: regenerate-index
+  cancel-in-progress: false
 
 jobs:
   regenerate:
@@ -24,17 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Regenerate index files
+      - name: Regenerate and push the index files
         run: |
-          chmod +x scripts/generate-index.sh
-          scripts/generate-index.sh
-
-      - name: Commit if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- all_pods.txt all_pods_versions.txt; then
-            git add all_pods.txt all_pods_versions.txt
-            git commit -m "Regenerate index files"
-            git push
-          fi
+          chmod +x scripts/push-index.sh scripts/generate-index.sh
+          scripts/push-index.sh main "$GITHUB_WORKSPACE"
