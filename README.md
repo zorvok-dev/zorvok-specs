@@ -1,14 +1,29 @@
-# Zorvok Specs
+# Zorvok Specs: the free public pod registry for Zorvok
 
-The free, public package index for [Zorvok](https://github.com/zorvok-dev/zorvok-ios) — a CocoaPods-compatible dependency manager for iOS. This repository *is* the registry: there is no server, no database, and no hosting bill. A published package is a JSON file committed to git; the index is read by cloning this repo, fetching it over HTTPS, or (once enabled) through GitHub Pages.
+The public pod registry for [Zorvok](https://github.com/zorvok-dev/zorvok-ios), the CocoaPods-compatible dependency manager for iOS. Publish new pods here with one command, including new versions of pods that are already on CocoaPods trunk, which stops accepting new versions on December 2, 2026.
 
-If you only want to **use** packages from here, skip to [Consuming this registry](#consuming-this-registry). If you want to **publish** one, skip to [Publishing a package](#publishing-a-package).
+This repository *is* the registry: no server, no database, no hosting bill. A published pod is its podspec, as JSON, committed to git and served in CocoaPods' own CDN format, so plain `pod install` can read it too.
+
+**Publish a pod** (details in [Publishing a package](#publishing-a-package)):
+
+```bash
+gh auth login        # once
+zorvok trunk push    # in your pod's folder
+```
+
+**Install one** (details in [Consuming this registry](#consuming-this-registry)):
+
+```ruby
+pod 'MyPod', :source => 'https://raw.githubusercontent.com/zorvok-dev/zorvok-specs/main/'
+```
+
+Publishing is fully automatic, like trunk.cocoapods.org: a GitHub Actions check accepts or rejects every publish in about a minute, and nobody reviews anything by hand. Names that already exist on CocoaPods trunk stay with their trunk owners.
 
 ## Why this repository exists
 
 CocoaPods' own public registry (`cdn.cocoapods.org`) is a CDN backed by a large, continuously-updated index of `Specs/` served over HTTP. Zorvok's design goal (see [zorvok-dev/zorvok-ios](https://github.com/zorvok-dev/zorvok-ios)) is to let projects adopt an independent registry **without forking that model**: the same protocol, the same directory shape, just a different place to publish a name you control.
 
-Running that as a live server costs money and needs operating. This repository proves it doesn't have to: CocoaPods' CDN source protocol only needs a handful of static files reachable over HTTP, and git + GitHub already provide exactly that, for free, with pull requests as the natural publish/review workflow. A second, self-hostable option that *is* a live server — for teams that want a private registry or SSO-gated access — exists separately at [zorvok-dev/zorvok-registry-ios](https://github.com/zorvok-dev/zorvok-registry-ios).
+Running that as a live server costs money and needs operating. This repository proves it doesn't have to: CocoaPods' CDN source protocol only needs a handful of static files reachable over HTTP, and git + GitHub already provide exactly that, for free, with pull requests as the natural publish/review workflow. A second, self-hostable option that *is* a live server — for teams that want a private registry or SSO-gated access — exists separately at `zorvok-registry-ios`.
 
 ## Where this fits: Zorvok's three-tier registry model
 
@@ -18,7 +33,7 @@ Zorvok resolves dependencies from any CocoaPods-compatible source, with no speci
 |---|---|---|---|
 | 1 | `cdn.cocoapods.org` — CocoaPods' own registry | The CocoaPods project | Free, already there |
 | 2 | **This repository** — Zorvok's free public registry | The Zorvok project, as static files in git | Free (GitHub-hosted) |
-| 3 | [zorvok-registry-ios](https://github.com/zorvok-dev/zorvok-registry-ios) — a self-hostable registry server | You, for a private/enterprise registry | Whatever you host it on |
+| 3 | `zorvok-registry-ios` — a self-hostable registry server | You, for a private/enterprise registry | Whatever you host it on |
 
 This split is deliberately analogous to Maven Central + a self-hosted Nexus/Artifactory: one free shared public index, plus the option to run your own for anything that shouldn't be public. From the client's point of view, all three are just a `source` URL — `zorvok install` (or plain `pod install`) doesn't know or care whether what answers at that URL is CocoaPods' CDN, this git repository, or a running Go server.
 
@@ -46,7 +61,7 @@ scripts/
   regenerate-index.yml        # regenerates the index after a maintainer merges a PR by hand
 ```
 
-This is exactly the file shape the real CocoaPods CDN protocol expects (`prefix_lengths: []` — this registry has nowhere near `cdn.cocoapods.org`'s scale, so there is no need for the MD5-sharded directory layout the real CDN uses to keep any one directory from growing too large). It is implemented and tested against the real protocol in [`zorvok-registry-ios`'s `cdn` package](https://github.com/zorvok-dev/zorvok-registry-ios/tree/main/cdn), which serves the identical shape from a live server instead of static files — the same client code resolves either one.
+This is exactly the file shape the real CocoaPods CDN protocol expects (`prefix_lengths: []` — this registry has nowhere near `cdn.cocoapods.org`'s scale, so there is no need for the MD5-sharded directory layout the real CDN uses to keep any one directory from growing too large). It is implemented and tested against the real protocol in `zorvok-registry-ios`'s `cdn` package, which serves the identical shape from a live server instead of static files — the same client code resolves either one.
 
 ## Consuming this registry
 
@@ -67,7 +82,9 @@ zorvok install --native --no-registry
 
 `--native` is required — plain `pod install` can't resolve a source that isn't declared in the Podfile (see [docs/adr/0004](https://github.com/zorvok-dev/zorvok-ios/blob/main/docs/adr/0004-federation-requires-podfile-source-line.md)). `zorvok install --native` drives CocoaPods' own installer directly and can inject an extra source in memory, without ever writing to your Podfile.
 
-> **GitHub Pages note:** this repository is laid out to be served from `https://zorvok-dev.github.io/zorvok-specs/` once GitHub Pages is enabled for it (repo Settings → Pages → Deploy from branch, `main` / `/ (root)`) — at that point the Pages URL and the `raw.githubusercontent.com` URL above are interchangeable. Until Pages is turned on, use the `raw.githubusercontent.com` URL shown above; it works today and needs no setup.
+> **GitHub Pages note:** this repository is laid out to be served from `https://zorvok-dev.github.io/zorvok-specs/` once GitHub Pages is enabled for it (repo Settings → Pages → Deploy from branch, `main` / `/ (root)`); the Pages URL and the `raw.githubusercontent.com` URL above are then interchangeable. Until then, use the `raw.githubusercontent.com` URL.
+>
+> **Known issue:** while the registry has no pods yet, raw.githubusercontent.com occasionally answers an install's first request for `all_pods_versions.txt` with HTTP 501. Running the install again works.
 
 ### With plain CocoaPods (`pod`)
 
@@ -141,7 +158,7 @@ A pull request you open yourself goes through exactly the same workflow:
 ## Relationship to the rest of Zorvok
 
 - [zorvok-dev/zorvok-ios](https://github.com/zorvok-dev/zorvok-ios) — the `zorvok` CLI: install/update, `trunk push`/`trunk register`/`trunk add-owner`/etc., and the full CocoaPods-compatible command set. Start there for anything about the client itself.
-- [zorvok-dev/zorvok-registry-ios](https://github.com/zorvok-dev/zorvok-registry-ios) — the self-hostable registry server (Tier 3), for a private or enterprise registry, with ownership management and deprecation through the `zorvok trunk` commands.
+- `zorvok-registry-ios` — the self-hostable registry server (Tier 3), for a private or enterprise registry, with ownership management and deprecation through the `zorvok trunk` commands.
 
 ## Scope
 
