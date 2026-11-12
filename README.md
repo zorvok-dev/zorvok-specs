@@ -35,13 +35,14 @@ Specs/
       <PodName>.podspec.json  # the published podspec, as submitted, verbatim — never modified after merge
 scripts/
   validate-pr.sh              # enforces immutability/structure/ownership on every publish PR
-  publish-policy.sh           # decides which valid PRs merge with no human in the loop
+  publish-policy.sh           # the rest of what trunk checks: publish or reject, no human in the loop
+  verify-trunk-owner.sh       # only a pod's CocoaPods trunk owners may publish it here
   generate-index.sh           # rebuilds all_pods.txt / all_pods_versions.txt from the Specs/ tree
   push-index.sh               # regenerates the index on the latest main and pushes it, retrying on races
   test-validate-pr.sh         # repeatable local test harness for validate-pr.sh (run it: no setup needed)
   test-publish-policy.sh      # repeatable local test harness for publish-policy.sh (same)
 .github/workflows/
-  publish.yml                 # judges every publish PR, merges the valid ones, comments a verdict
+  publish.yml                 # judges every publish PR: merges or closes it, comments a verdict
   regenerate-index.yml        # regenerates the index after a maintainer merges a PR by hand
 ```
 
@@ -94,7 +95,7 @@ curl https://raw.githubusercontent.com/zorvok-dev/zorvok-specs/main/Specs/<PodNa
 
 ## Publishing a package
 
-Publishing is one command, like `pod trunk push`. Only the podspec goes into this registry; your pod's code, frameworks and xcframeworks stay wherever its `source` points.
+Publishing is one command, like `pod trunk push`, and it's fully automatic: no maintainer reviews anything. Only the podspec goes into this registry; your pod's code, frameworks and xcframeworks stay wherever its `source` points.
 
 ```bash
 gh auth login        # once: publishing uses your GitHub account (or set GITHUB_TOKEN)
@@ -102,19 +103,31 @@ cd /path/to/your/pod
 zorvok trunk push    # or: zorvok trunk push MyPod.podspec
 ```
 
-`zorvok trunk push` lints the podspec and converts it to JSON with `pod ipc spec`; this registry stores only that evaluated JSON, never Ruby, so nothing here is ever executed. It then opens a pull request from your fork that adds `Specs/<PodName>/<version>/<PodName>.podspec.json`, plus `Specs/<PodName>/OWNERS` listing your GitHub username on a pod's first publish. Then it waits, usually about a minute, for [the publish workflow](.github/workflows/publish.yml) to decide:
+`zorvok trunk push` lints the podspec and converts it to JSON with `pod ipc spec`; this registry stores only that evaluated JSON, never Ruby, so nothing here is ever executed. It opens a pull request from your fork that adds `Specs/<PodName>/<version>/<PodName>.podspec.json`, plus `Specs/<PodName>/OWNERS` listing your GitHub username on a pod's first publish. Then it waits, usually about a minute, for [the publish workflow](.github/workflows/publish.yml) to decide:
 
-- **Published.** The pull request passed every check below, so the workflow merged it and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long).
-- **Needs review.** It's valid, but a maintainer looks at it once before it goes live. That happens for the first version here of a name that already exists on CocoaPods trunk (so nobody can claim someone else's pod; its later versions publish automatically), for a podspec that uses `prepare_command`, and for a pull request that changes anything other than new podspecs.
-- **Rejected.** It breaks a rule below. `zorvok trunk push` prints why; fix it and run it again, which updates the same pull request.
+- **Published.** It passed every rule below, so the workflow merged it and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long).
+- **Rejected.** `zorvok trunk push` prints exactly why, and the pull request is closed. Fix it and run `zorvok trunk push` again.
 
-`scripts/validate-pr.sh` enforces the registry's rules on every pull request:
+The rules are the ones trunk.cocoapods.org enforces:
 
 - **Immutability** — a pull request may only *add* files under `Specs/<name>/<version>/`; modifying or deleting an already-merged version's files is rejected. A published version is permanent, exactly as it is on `zorvok-registry-ios` (`ErrVersionExists`) and on `cdn.cocoapods.org` itself.
 - **Structure** — every added `*.podspec.json` must be valid JSON whose `name`/`version` fields match the path it was added at.
 - **Ownership** — if `Specs/<PodName>/OWNERS` already exists (as of the pull request's base commit, not its own diff), the pull request's author must already be listed in it. You can't add yourself to `OWNERS` and publish a new version of someone else's pod in the same pull request. A new pod's first publisher becomes its owner: first publisher wins, the same rule `zorvok-registry-ios` enforces with a database constraint.
+- **Pods that exist on CocoaPods trunk stay with their owners.** If the name is already on CocoaPods trunk, only one of its owners there can publish it here. That's checked against trunk's own records, never against anything in the pull request, and any one of these counts:
+  - the email you registered with `pod trunk register` is the public email on your GitHub profile, or GitHub credits your account with commits to the pod's repository made with that email (already true for most pod authors);
+  - your GitHub account owns the repository trunk's podspec points to, or you're a public member of the organization that owns it;
+  - that repository's default branch has a `.zorvok-owners` file listing your GitHub username;
+  - the pod's homepage site serves `/.well-known/zorvok-owners` listing your GitHub username (for binary-only pods).
 
-`scripts/publish-policy.sh` then decides what may merge with no human in the loop (the "Needs review" cases above). Both are exercised against real git repositories by `scripts/test-validate-pr.sh` and `scripts/test-publish-policy.sh`; run them any time, with no setup. The workflow YAML itself hasn't run on GitHub Actions yet, so if you're among the first to publish, watch the Actions run on your pull request and report anything unexpected.
+  If none match, `zorvok trunk push` lists exactly which of these would work for that pod. Once a pod's first version is published here, its later versions follow the Ownership rule above.
+- **No `prepare_command`**, which runs shell commands on every machine that installs the pod. CocoaPods trunk stopped accepting it in May 2025.
+- **Only podspecs and owners.** A publish may add podspecs and change a pod's `OWNERS`, and nothing else in this repository.
+
+`scripts/validate-pr.sh` enforces the first three; `scripts/publish-policy.sh` and `scripts/verify-trunk-owner.sh` enforce the rest. `scripts/test-validate-pr.sh` and `scripts/test-publish-policy.sh` exercise them against real git repositories and local stand-ins for CocoaPods trunk and GitHub; run them any time, with no setup. The workflow YAML itself hasn't run on GitHub Actions yet, so if you're among the first to publish, watch the Actions run on your pull request and report anything unexpected.
+
+### Adding a co-owner
+
+Open a pull request that adds their GitHub username to `Specs/<PodName>/OWNERS`, one per line. If you're already listed, it's merged automatically, like `pod trunk add-owner`. Removing someone works the same way, as long as at least one owner remains.
 
 ### Publishing by hand
 
@@ -123,9 +136,7 @@ A pull request you open yourself goes through exactly the same workflow:
 1. Convert the podspec: `zorvok ipc spec MyPod.podspec > MyPod.podspec.json` (or `pod ipc spec`).
 2. Add it at `Specs/<PodName>/<version>/<PodName>.podspec.json`, where `<PodName>` and `<version>` exactly match the JSON's `name` and `version`.
 3. First time publishing `<PodName>`? Also add `Specs/<PodName>/OWNERS`, one GitHub username per line, including yours.
-4. Open the pull request. The workflow comments its verdict on it, and merges it if it can.
-
-To add a co-owner, open a pull request that adds their GitHub username to `Specs/<PodName>/OWNERS`; a maintainer reviews it.
+4. Open the pull request. The workflow comments its verdict on it, then merges it or closes it.
 
 ## Relationship to the rest of Zorvok
 
