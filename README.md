@@ -45,7 +45,7 @@ all_pods.txt                  # one pod name per line — regenerated automatica
 all_pods_versions.txt         # "<name>/<v1>/<v2>/..." per line — regenerated automatically on every merge
 Specs/
   <PodName>/
-    OWNERS                    # one GitHub username per line — who may publish new versions of this pod
+    OWNERS                    # "<GitHub user ID> <username>" per line — who may publish new versions of this pod
     <version>/
       <PodName>.podspec.json  # the published podspec, as submitted, verbatim — never modified after merge
 scripts/
@@ -56,9 +56,10 @@ scripts/
   push-index.sh               # regenerates the index on the latest main and pushes it, retrying on races
   test-validate-pr.sh         # repeatable local test harness for validate-pr.sh (run it: no setup needed)
   test-publish-policy.sh      # repeatable local test harness for publish-policy.sh (same)
+  test-publish-workflow.sh    # runs publish.yml's own script on simulated pull requests, against live trunk data
 .github/workflows/
-  publish.yml                 # judges every publish PR: merges or closes it, comments a verdict
-  regenerate-index.yml        # regenerates the index after a maintainer merges a PR by hand
+  publish.yml                 # judges every publish PR: publishes or closes it, comments a verdict
+  regenerate-index.yml        # regenerates the index after anything else lands on main
 ```
 
 This is exactly the file shape the real CocoaPods CDN protocol expects (`prefix_lengths: []` — this registry has nowhere near `cdn.cocoapods.org`'s scale, so there is no need for the MD5-sharded directory layout the real CDN uses to keep any one directory from growing too large). It is implemented and tested against the real protocol in `zorvok-registry-ios`'s `cdn` package, which serves the identical shape from a live server instead of static files — the same client code resolves either one.
@@ -88,20 +89,19 @@ zorvok install --native --no-registry
 
 ### With plain CocoaPods (`pod`)
 
-Nothing Zorvok-specific is required — this is a standard CocoaPods CDN source. Add it to a Podfile exactly as you would any other private spec repo:
+Nothing Zorvok-specific is required: this is a standard CocoaPods CDN source. Point each pod you take from it at it with `:source =>`, and leave every other pod on CocoaPods' default source:
 
 ```ruby
-source 'https://raw.githubusercontent.com/zorvok-dev/zorvok-specs/main/'
-source 'https://cdn.cocoapods.org/'   # keep the default source for every other pod
-
 target 'MyApp' do
-  pod 'SomePodPublishedHere', '1.0.0'
+  pod 'SomePodPublishedHere', '1.0.0', :source => 'https://raw.githubusercontent.com/zorvok-dev/zorvok-specs/main/'
 end
 ```
 
 ```bash
 pod install
 ```
+
+> **Pin, don't add a global `source` line.** With several `source` lines, CocoaPods merges every source's versions of a pod and picks the highest. Anyone can publish a pod name here that isn't on CocoaPods trunk, so if your company's private spec repo has a pod that isn't on trunk either, someone could publish a higher version of the same name here, and a Podfile that lists both sources as `source` lines would install theirs (a "dependency confusion" attack). A `:source =>` pin takes that pod from exactly one source.
 
 ### Browsing without installing anything
 
@@ -120,31 +120,41 @@ cd /path/to/your/pod
 zorvok trunk push    # or: zorvok trunk push MyPod.podspec
 ```
 
-`zorvok trunk push` lints the podspec and converts it to JSON with `pod ipc spec`; this registry stores only that evaluated JSON, never Ruby, so nothing here is ever executed. It opens a pull request from your fork that adds `Specs/<PodName>/<version>/<PodName>.podspec.json`, plus `Specs/<PodName>/OWNERS` listing your GitHub username on a pod's first publish. Then it waits, usually about a minute, for [the publish workflow](.github/workflows/publish.yml) to decide:
+`zorvok trunk push` lints the podspec and converts it to JSON with `pod ipc spec`; this registry stores only that evaluated JSON, never Ruby, so nothing here is ever executed. It opens a pull request from your fork that adds `Specs/<PodName>/<version>/<PodName>.podspec.json`, plus `Specs/<PodName>/OWNERS` listing your GitHub user ID and username on a pod's first publish. Then it waits, usually about a minute, for [the publish workflow](.github/workflows/publish.yml) to decide:
 
-- **Published.** It passed every rule below, so the workflow merged it and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long).
+- **Published.** It passed every rule below, so the workflow added it to `main` and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long).
 - **Rejected.** `zorvok trunk push` prints exactly why, and the pull request is closed. Fix it and run `zorvok trunk push` again.
 
 The rules are the ones trunk.cocoapods.org enforces:
 
 - **Immutability** — a pull request may only *add* files under `Specs/<name>/<version>/`; modifying or deleting an already-merged version's files is rejected. A published version is permanent, exactly as it is on `zorvok-registry-ios` (`ErrVersionExists`) and on `cdn.cocoapods.org` itself.
 - **Structure** — every added `*.podspec.json` must be valid JSON whose `name`/`version` fields match the path it was added at.
-- **Ownership** — if `Specs/<PodName>/OWNERS` already exists (as of the pull request's base commit, not its own diff), the pull request's author must already be listed in it. You can't add yourself to `OWNERS` and publish a new version of someone else's pod in the same pull request. A new pod's first publisher becomes its owner: first publisher wins, the same rule `zorvok-registry-ios` enforces with a database constraint.
+- **Ownership** — if `Specs/<PodName>/OWNERS` already exists, the pull request's author must already be listed in it. That's judged against the registry as it is when the workflow runs, never against the commit the pull request happens to be based on (which its author chooses), so an owner who has been removed can't publish from an old branch. You can't add yourself to `OWNERS` and publish a new version of someone else's pod in the same pull request. A new pod's first publisher becomes its owner: first publisher wins, the same rule `zorvok-registry-ios` enforces with a database constraint.
+- **Owners are GitHub user IDs.** Each `OWNERS` line is `<GitHub user ID> <username>`, and only the ID counts. A GitHub username can be renamed and then registered by someone else; the numeric ID never changes and is never reused. `zorvok trunk push` writes the line for you.
 - **Pods that exist on CocoaPods trunk stay with their owners.** If the name is already on CocoaPods trunk, only one of its owners there can publish it here. That's checked against trunk's own records, never against anything in the pull request, and any one of these counts:
-  - the email you registered with `pod trunk register` is the public email on your GitHub profile, or GitHub credits your account with commits to the pod's repository made with that email (already true for most pod authors);
-  - your GitHub account owns the repository trunk's podspec points to, or you're a public member of the organization that owns it;
-  - that repository's default branch has a `.zorvok-owners` file listing your GitHub username;
-  - the pod's homepage site serves `/.well-known/zorvok-owners` listing your GitHub username (for binary-only pods).
+  - the email you registered with `pod trunk register` is the public email on your GitHub profile;
+  - GitHub credits your account with commits to the pod's repository made with that email (already true for most pod authors);
+  - your GitHub account owns the repository trunk's latest podspec points to, and both your account and the repository existed before trunk published that version;
+  - that repository's default branch has a `.zorvok-owners` file listing your GitHub user ID (or username), and the repository and its owner existed before trunk published the latest version.
 
-  If none match, `zorvok trunk push` lists exactly which of these would work for that pod. Once a pod's first version is published here, its later versions follow the Ownership rule above.
+  The age checks mean a repository or account created later, for example after someone else's lapsed name was taken over, can't vouch for a pod. A name that differs from a trunk pod's only in case, like `alamofire`, is refused outright. If none of these match, `zorvok trunk push` lists exactly which would work for that pod, with the `.zorvok-owners` line to add. Once a pod's first version is published here, its later versions follow the Ownership rule above.
 - **No `prepare_command`**, which runs shell commands on every machine that installs the pod. CocoaPods trunk stopped accepting it in May 2025.
-- **Only podspecs and owners.** A publish may add podspecs and change a pod's `OWNERS`, and nothing else in this repository.
+- **One pod per pull request, podspecs and owners only.** A publish may add one pod's podspecs and change its `OWNERS`, and nothing else in this repository. Every file must be a plain file: no symlinks, submodules or executables.
+- **No look-alike names.** A new pod's name can't differ from a pod already here only in case.
 
-`scripts/validate-pr.sh` enforces the first three; `scripts/publish-policy.sh` and `scripts/verify-trunk-owner.sh` enforce the rest. `scripts/test-validate-pr.sh` and `scripts/test-publish-policy.sh` exercise them against real git repositories and local stand-ins for CocoaPods trunk and GitHub; run them any time, with no setup. The workflow YAML itself hasn't run on GitHub Actions yet, so if you're among the first to publish, watch the Actions run on your pull request and report anything unexpected.
+`scripts/validate-pr.sh` enforces the first four; `scripts/publish-policy.sh` and `scripts/verify-trunk-owner.sh` enforce the rest. `scripts/test-validate-pr.sh` and `scripts/test-publish-policy.sh` exercise them against real git repositories and local stand-ins for CocoaPods trunk and GitHub; run them any time, with no setup. `scripts/test-publish-workflow.sh` runs the workflow's own script end to end on simulated pull requests, including an attack by a removed owner, against live CocoaPods trunk and GitHub data. The workflow YAML itself hasn't run on GitHub Actions yet, so if you're among the first to publish, watch the Actions run on your pull request and report anything unexpected.
 
 ### Adding a co-owner
 
-Open a pull request that adds their GitHub username to `Specs/<PodName>/OWNERS`, one per line. If you're already listed, it's merged automatically, like `pod trunk add-owner`. Removing someone works the same way, as long as at least one owner remains.
+Open a pull request that adds a line for them to `Specs/<PodName>/OWNERS`: their GitHub user ID, a space, and their username. Look up the ID with `gh api users/<username> --jq .id`, or at `https://api.github.com/users/<username>`. Lines starting with `#` are comments.
+
+```
+# Specs/MyPod/OWNERS
+1019875 onevcat
+583231 octocat
+```
+
+If you're already listed, it's published automatically, like `pod trunk add-owner`. Removing someone works the same way, as long as at least one owner remains.
 
 ### Publishing by hand
 
@@ -152,8 +162,8 @@ A pull request you open yourself goes through exactly the same workflow:
 
 1. Convert the podspec: `zorvok ipc spec MyPod.podspec > MyPod.podspec.json` (or `pod ipc spec`).
 2. Add it at `Specs/<PodName>/<version>/<PodName>.podspec.json`, where `<PodName>` and `<version>` exactly match the JSON's `name` and `version`.
-3. First time publishing `<PodName>`? Also add `Specs/<PodName>/OWNERS`, one GitHub username per line, including yours.
-4. Open the pull request. The workflow comments its verdict on it, then merges it or closes it.
+3. First time publishing `<PodName>`? Also add `Specs/<PodName>/OWNERS` with a `<GitHub user ID> <username>` line for yourself (see above).
+4. Open the pull request. The workflow comments its verdict on it, then publishes it or closes it.
 
 ## Relationship to the rest of Zorvok
 

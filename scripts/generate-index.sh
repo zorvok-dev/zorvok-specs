@@ -13,8 +13,8 @@ set -euo pipefail
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SPECS_DIR="$ROOT/Specs"
 
-> "$ROOT/all_pods.txt"
-> "$ROOT/all_pods_versions.txt"
+: > "$ROOT/all_pods.txt"
+: > "$ROOT/all_pods_versions.txt"
 
 [ -d "$SPECS_DIR" ] || exit 0
 
@@ -35,13 +35,13 @@ for pod_dir in "$SPECS_DIR"/*/; do
 
   [ "${#versions[@]}" -eq 0 ] && continue
 
-  echo "$name" >> "$ROOT/all_pods.txt"
+  printf '%s\n' "$name" >> "$ROOT/all_pods.txt"
 
   line="$name"
   for v in "${versions[@]}"; do
     line="$line/$v"
   done
-  echo "$line" >> "$ROOT/all_pods_versions.txt"
+  printf '%s\n' "$line" >> "$ROOT/all_pods_versions.txt"
 done
 
 sort -o "$ROOT/all_pods.txt" "$ROOT/all_pods.txt"

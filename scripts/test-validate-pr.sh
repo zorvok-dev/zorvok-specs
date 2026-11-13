@@ -33,7 +33,7 @@ mkdir -p Specs/ExistingPod/1.0.0
 cat > Specs/ExistingPod/1.0.0/ExistingPod.podspec.json <<'EOF'
 {"name": "ExistingPod", "version": "1.0.0"}
 EOF
-printf 'alice\n' > Specs/ExistingPod/OWNERS
+printf '1001 alice\n' > Specs/ExistingPod/OWNERS
 git add Specs/ExistingPod
 git commit -q -m "seed: ExistingPod 1.0.0 owned by alice"
 BASE="$(git rev-parse HEAD)"
@@ -78,7 +78,7 @@ setup_valid_update() {
 {"name": "ExistingPod", "version": "2.0.0"}
 EOF
 }
-run_case "alice publishes ExistingPod 2.0.0 (existing owner)" "alice" "pass" setup_valid_update
+run_case "alice publishes ExistingPod 2.0.0 (existing owner)" "1001" "pass" setup_valid_update
 
 # 2. Non-owner tries to publish a version of someone else's pod — should fail.
 setup_non_owner_publish() {
@@ -87,7 +87,7 @@ setup_non_owner_publish() {
 {"name": "ExistingPod", "version": "2.0.0"}
 EOF
 }
-run_case "bob publishes ExistingPod 2.0.0 (not an owner)" "bob" "fail" setup_non_owner_publish
+run_case "bob publishes ExistingPod 2.0.0 (not an owner)" "1002" "fail" setup_non_owner_publish
 
 # 3. Ownership hijack: add yourself to OWNERS and publish in the same PR — should fail.
 setup_hijack() {
@@ -95,9 +95,9 @@ setup_hijack() {
   cat > Specs/ExistingPod/2.0.0/ExistingPod.podspec.json <<'EOF'
 {"name": "ExistingPod", "version": "2.0.0"}
 EOF
-  printf 'alice\nbob\n' > Specs/ExistingPod/OWNERS
+  printf '1001 alice\n1002 bob\n' > Specs/ExistingPod/OWNERS
 }
-run_case "bob adds himself to OWNERS and publishes in the same PR" "bob" "fail" setup_hijack
+run_case "bob adds himself to OWNERS and publishes in the same PR" "1002" "fail" setup_hijack
 
 # 4. Immutability: modify an already-published version's file — should fail.
 setup_immutability_violation() {
@@ -105,7 +105,7 @@ setup_immutability_violation() {
 {"name": "ExistingPod", "version": "1.0.0", "summary": "tampered"}
 EOF
 }
-run_case "alice modifies an already-published ExistingPod 1.0.0" "alice" "fail" setup_immutability_violation
+run_case "alice modifies an already-published ExistingPod 1.0.0" "1001" "fail" setup_immutability_violation
 
 # 5. Name/version mismatch between podspec content and its path — should fail.
 setup_name_mismatch() {
@@ -114,14 +114,14 @@ setup_name_mismatch() {
 {"name": "SomeOtherName", "version": "2.0.0"}
 EOF
 }
-run_case "podspec name field doesn't match its own path" "alice" "fail" setup_name_mismatch
+run_case "podspec name field doesn't match its own path" "1001" "fail" setup_name_mismatch
 
 # 6. Malformed JSON — should fail.
 setup_malformed_json() {
   mkdir -p Specs/ExistingPod/2.0.0
   echo '{not valid json' > Specs/ExistingPod/2.0.0/ExistingPod.podspec.json
 }
-run_case "malformed JSON podspec" "alice" "fail" setup_malformed_json
+run_case "malformed JSON podspec" "1001" "fail" setup_malformed_json
 
 # 7. Brand-new pod, first publish, with its own OWNERS — should pass.
 setup_new_pod() {
@@ -129,9 +129,9 @@ setup_new_pod() {
   cat > Specs/BrandNewPod/1.0.0/BrandNewPod.podspec.json <<'EOF'
 {"name": "BrandNewPod", "version": "1.0.0"}
 EOF
-  printf 'carol\n' > Specs/BrandNewPod/OWNERS
+  printf '1003 carol\n' > Specs/BrandNewPod/OWNERS
 }
-run_case "carol publishes BrandNewPod 1.0.0 (brand new, adds own OWNERS)" "carol" "pass" setup_new_pod
+run_case "carol publishes BrandNewPod 1.0.0 (brand new, adds own OWNERS)" "1003" "pass" setup_new_pod
 
 # 8. Brand-new pod, first publish, but forgets to add OWNERS — should fail.
 setup_new_pod_no_owners() {
@@ -140,7 +140,31 @@ setup_new_pod_no_owners() {
 {"name": "AnotherNewPod", "version": "1.0.0"}
 EOF
 }
-run_case "dave publishes a new pod but forgets to add OWNERS" "dave" "fail" setup_new_pod_no_owners
+run_case "dave publishes a new pod but forgets to add OWNERS" "1004" "fail" setup_new_pod_no_owners
+
+# 9. A rename of a published version (git would report R100) — should fail.
+setup_rename() {
+  mkdir -p Specs/ExistingPod/2.0.0
+  git mv Specs/ExistingPod/1.0.0/ExistingPod.podspec.json Specs/ExistingPod/2.0.0/ExistingPod.podspec.json
+  echo '{"name": "ExistingPod", "version": "2.0.0"}' > Specs/ExistingPod/2.0.0/ExistingPod.podspec.json
+}
+run_case "bob renames ExistingPod 1.0.0 to 2.0.0" "1002" "fail" setup_rename
+
+# 10. A new pod whose OWNERS lists a bare username (the old format) — should fail.
+setup_username_owners() {
+  mkdir -p Specs/UsernamePod/1.0.0
+  echo '{"name": "UsernamePod", "version": "1.0.0"}' > Specs/UsernamePod/1.0.0/UsernamePod.podspec.json
+  printf 'carol\n' > Specs/UsernamePod/OWNERS
+}
+run_case "carol publishes a new pod with a username-only OWNERS" "1003" "fail" setup_username_owners
+
+# 11. A pod name outside CocoaPods' characters ("-n" would vanish from the index) — should fail.
+setup_bad_name() {
+  mkdir -p -- "Specs/-n/1.0.0"
+  echo '{"name": "-n", "version": "1.0.0"}' > "Specs/-n/1.0.0/-n.podspec.json"
+  printf '1003 carol\n' > "Specs/-n/OWNERS"
+}
+run_case "carol publishes a pod named -n" "1003" "fail" setup_bad_name
 
 echo
 echo "$pass passed, $fail failed"

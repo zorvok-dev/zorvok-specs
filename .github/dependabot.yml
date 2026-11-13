@@ -1,0 +1,10 @@
+# The workflows pin actions/checkout to a commit, so a moved tag can't
+# change what runs with this repository's write token. Dependabot keeps
+# that pin current: it opens a pull request for each new release, with
+# the commit and its version comment updated together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

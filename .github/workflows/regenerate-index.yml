@@ -19,8 +19,8 @@ on:
       - "Specs/**"
   workflow_dispatch:
 
-permissions:
-  contents: write
+# Nothing by default; the one job asks for exactly what it uses.
+permissions: {}
 
 concurrency:
   group: regenerate-index
@@ -28,9 +28,15 @@ concurrency:
 
 jobs:
   regenerate:
+    name: Regenerate the index
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to push the regenerated index files to main
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The job pushes with this token, and uploads no artifacts.
+          persist-credentials: true # zizmor: ignore[artipacked]
 
       - name: Regenerate and push the index files
         run: |

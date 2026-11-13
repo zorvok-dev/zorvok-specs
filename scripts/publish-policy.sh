@@ -3,7 +3,8 @@
 # passed validate-pr.sh is published (merged) or rejected (zorvok ADR
 # 0010). validate-pr.sh answers "does this break the registry's rules?";
 # this covers the rest of what trunk.cocoapods.org decides. A pull request
-# is published only if every change in it is one of:
+# is published only if it concerns ONE pod and every change in it is one
+# of:
 #
 #   - a new version: Specs/<name>/<version>/<name>.podspec.json added;
 #   - a new pod's owners: Specs/<name>/OWNERS added alongside a version of
@@ -12,20 +13,24 @@
 #     current owners, leaving at least one (`pod trunk add-owner` /
 #     `remove-owner`, as a pull request);
 #
-# and, on top of that:
+# each a plain file (no symlinks or executables), and on top of that:
 #
 #   - no podspec uses `prepare_command`, which runs shell commands on every
 #     machine that installs the pod (CocoaPods trunk has rejected new
-#     podspecs that use it since May 2025); and
-#   - a pod that's new here but already on CocoaPods trunk is claimed by
-#     someone verify-trunk-owner.sh shows controls its repository or site.
+#     podspecs that use it since May 2025);
+#   - a new pod's name doesn't differ only in letter case from a pod
+#     already here; and
+#   - a pod that's new here but already on CocoaPods trunk is published
+#     by one of its trunk owners, as verify-trunk-owner.sh decides.
 #
 # validate-pr.sh's immutability rule covers version directories but not
 # OWNERS, so the OWNERS rules above are what keep a pull request from
-# taking over someone else's pod.
+# taking over someone else's pod. Owners are matched by numeric GitHub
+# user ID (see validate-pr.sh).
 #
-# Usage: publish-policy.sh <base-ref> <head-ref> <author>
-#   Judges the pull request's own changes (base..head) as <author>'s.
+# Usage: publish-policy.sh <base-ref> <head-ref> <author-user-id> <author-username>
+#   Judges the change from base to head as the author's. The publish
+#   workflow passes the registry's current tip as <base-ref>.
 #   verify-trunk-owner.sh's test overrides apply.
 #
 # Exits 0 to publish, or 1 with every reason it can't be, one per line,
@@ -33,18 +38,32 @@
 
 set -euo pipefail
 
-BASE_REF="${1:?usage: publish-policy.sh <base-ref> <head-ref> <author>}"
-HEAD_REF="${2:?usage: publish-policy.sh <base-ref> <head-ref> <author>}"
-AUTHOR="${3:?usage: publish-policy.sh <base-ref> <head-ref> <author>}"
+USAGE="usage: publish-policy.sh <base-ref> <head-ref> <author-user-id> <author-username>"
+BASE_REF="${1:?$USAGE}"
+HEAD_REF="${2:?$USAGE}"
+AUTHOR_ID="${3:?$USAGE}"
+AUTHOR_LOGIN="${4:?$USAGE}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 reasons=()
 versions=()    # "<name>/<version>" for each added podspec
 new_owners=()  # pods whose OWNERS this pull request adds
 owner_edits=() # pods whose existing OWNERS it edits
+pods=" "       # every pod this pull request touches
+
+owner_ids() {
+  git show "$1:$2" | sed 's/#.*//' | awk 'NF { print $1 }'
+}
 
 while IFS=$'\t' read -r status path; do
   [ -z "$path" ] && continue
+  if [[ "$path" =~ ^Specs/([^/]+)/ ]]; then
+    case "$pods" in *" ${BASH_REMATCH[1]} "*) ;; *) pods="$pods${BASH_REMATCH[1]} " ;; esac
+  fi
+  if [ "$status" != "D" ] && [ "$(git ls-tree "$HEAD_REF" -- "$path" | awk '{ print $1 }')" != "100644" ]; then
+    reasons+=("$path isn't a plain file (symlinks and executables aren't allowed)")
+    continue
+  fi
   if [ "$status" = "A" ] && [[ "$path" =~ ^Specs/([^/]+)/([^/]+)/([^/]+)\.podspec\.json$ ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[3]}" ]; then
     versions+=("${BASH_REMATCH[1]}/${BASH_REMATCH[2]}")
   elif [ "$status" = "A" ] && [[ "$path" =~ ^Specs/([^/]+)/OWNERS$ ]]; then
@@ -55,6 +74,12 @@ while IFS=$'\t' read -r status path; do
     reasons+=("$path: a publish can only add podspecs or change a pod's OWNERS")
   fi
 done < <(git diff --no-renames --name-status "$BASE_REF" "$HEAD_REF")
+
+# --- One pod per pull request ---
+pod_count="$(wc -w <<<"$pods" | tr -d ' ')"
+if [ "$pod_count" -gt 1 ]; then
+  reasons+=("it changes $pod_count pods (${pods# }); a publish can change only one pod at a time")
+fi
 
 if [ "${#versions[@]}" -eq 0 ] && [ "${#owner_edits[@]}" -eq 0 ]; then
   reasons+=("it doesn't add a version or change a pod's owners")
@@ -73,10 +98,10 @@ done
 
 # --- Owners changes: by a current owner, leaving at least one ---
 for name in ${owner_edits[@]+"${owner_edits[@]}"}; do
-  if ! git show "$BASE_REF:Specs/$name/OWNERS" | grep -xF "$AUTHOR" >/dev/null; then
-    reasons+=("only a current owner of $name can change Specs/$name/OWNERS, and $AUTHOR isn't listed in it")
+  if ! grep -qxF "$AUTHOR_ID" <<<"$(owner_ids "$BASE_REF" "Specs/$name/OWNERS")"; then
+    reasons+=("only a current owner of $name can change Specs/$name/OWNERS, and $AUTHOR_LOGIN (GitHub user $AUTHOR_ID) isn't listed in it")
   fi
-  if ! git show "$HEAD_REF:Specs/$name/OWNERS" | grep '[^[:space:]]' >/dev/null; then
+  if [ -z "$(owner_ids "$HEAD_REF" "Specs/$name/OWNERS")" ]; then
     reasons+=("Specs/$name/OWNERS would be left with no owners")
   fi
 done
@@ -90,7 +115,8 @@ for v in ${versions[@]+"${versions[@]}"}; do
   fi
 done
 
-# --- A name that's new here but already on CocoaPods trunk ---
+# --- A name that's new here: no case-only clash, and trunk owners only ---
+existing_lc="$(git ls-tree --name-only "$BASE_REF" Specs/ 2>/dev/null | sed 's|^Specs/||' | tr '[:upper:]' '[:lower:]')"
 checked=" "
 for v in ${versions[@]+"${versions[@]}"}; do
   name="${v%%/*}"
@@ -100,8 +126,13 @@ for v in ${versions[@]+"${versions[@]}"}; do
   # validate-pr.sh; only a first publish here needs this.
   git show "$BASE_REF:Specs/$name/OWNERS" >/dev/null 2>&1 && continue
 
+  if grep -qxF "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" <<<"$existing_lc"; then
+    reasons+=("a pod whose name differs from $name only in letter case is already published here")
+    continue
+  fi
+
   rc=0
-  out="$("$SCRIPT_DIR/verify-trunk-owner.sh" "$name" "$AUTHOR")" || rc=$?
+  out="$("$SCRIPT_DIR/verify-trunk-owner.sh" "$name" "$AUTHOR_ID" "$AUTHOR_LOGIN")" || rc=$?
   case "$rc" in
     0) ;;
     2) reasons+=("CocoaPods trunk couldn't be reached to check whether $name is already taken there; run zorvok trunk push again in a few minutes") ;;

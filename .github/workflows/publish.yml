@@ -10,13 +10,19 @@ name: Publish
 #   1. scripts/validate-pr.sh: immutability, structure and ownership.
 #   2. scripts/publish-policy.sh: what else trunk would check, including,
 #      for a name that already exists on CocoaPods trunk, that the
-#      publisher controls that pod's repository or website
-#      (scripts/verify-trunk-owner.sh).
+#      publisher is one of its owners there (scripts/verify-trunk-owner.sh).
 #
-# A pull request that passes both is merged here and the index files are
-# regenerated in the same job, since a merge made with this workflow's token
-# doesn't trigger regenerate-index.yml. Every run ends with a comment whose
-# first line is a machine-readable verdict on the exact commit it judged;
+# Both judge the pull request as it would land on the registry's CURRENT
+# tip: the workflow builds that exact merge commit itself (git merge-tree,
+# without touching the working tree), checks it against the tip, and
+# publishes it by pushing it as a fast-forward. The commit the pull request
+# happens to be based on is never what gets checked, because its author
+# chooses it (an older base would otherwise let a removed owner publish).
+# If main moves while a run is checking, the fast-forward push fails and
+# the checks run again on the new tip. A push made with this workflow's
+# token doesn't trigger regenerate-index.yml, so the index files are
+# regenerated in the same job. Every run ends with a comment whose first
+# line is a machine-readable verdict on the exact commit it judged;
 # `zorvok trunk push` waits for that comment.
 #
 # Security: pull_request_target runs with this repository's write token, so
@@ -25,8 +31,9 @@ name: Publish
 # the pull request's commits as data only, and runs only those copies, which
 # only read files out of git (git show / git diff / jq) and fetch public
 # data from CocoaPods trunk and GitHub. Nothing from the pull request is
-# interpolated into a script either: every value reaches the shell through
-# env.
+# interpolated into a script: every value reaches the shell through env,
+# and the verdict comment quotes details as a code block with control
+# characters removed. The checkout action is pinned to a commit.
 #
 # NOTE: like regenerate-index.yml, this YAML hasn't run on real GitHub
 # Actions yet; the scripts it calls are tested locally
@@ -34,37 +41,48 @@ name: Publish
 # first real publish's run.
 
 on:
-  pull_request_target:
+  # pull_request_target is what gives a fork's pull request a token that
+  # can publish, and it's safe here only because nothing from the pull
+  # request ever runs (see Security above).
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, synchronize, reopened]
     paths:
       - "Specs/**"
 
-permissions:
-  contents: write
-  pull-requests: write
-  actions: write # to start regenerate-index.yml if this job can't push the index
+# Nothing by default; the one job asks for exactly what it uses.
+permissions: {}
 
 # One run per pull request at a time; a newer push to it replaces a run
-# still in progress. Different pull requests run side by side: merges are
-# atomic on GitHub's side, and push-index.sh retries when two land at once.
+# still in progress. Different pull requests run side by side: each
+# publishes by fast-forward, so the one that loses a race checks again,
+# and push-index.sh retries the same way.
 concurrency:
   group: publish-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   publish:
+    name: Judge and publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to push the published entry and the index to main
+      pull-requests: write # to comment the verdict, and close a rejected pull request
+      actions: write # to start regenerate-index.yml if this job can't push the index
     env:
       GH_TOKEN: ${{ github.token }}
       PR: ${{ github.event.pull_request.number }}
       AUTHOR: ${{ github.event.pull_request.user.login }}
+      AUTHOR_ID: ${{ github.event.pull_request.user.id }}
       BASE: ${{ github.event.pull_request.base.ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
+          # The job pushes with this token. The same token is in GH_TOKEN
+          # for gh anyway, and the job uploads no artifacts.
+          persist-credentials: true # zizmor: ignore[artipacked]
 
       - name: Judge, then publish or explain
         id: judge
@@ -80,28 +98,62 @@ jobs:
             echo "A newer commit has been pushed to this pull request; its own run judges it."
             exit 0
           fi
-          merge_base="$(git merge-base "origin/$BASE" "$HEAD_SHA")"
 
-          verdict=published
-          details="Published. It can take up to 5 minutes to show up everywhere."
-          if ! out="$("$tools/validate-pr.sh" "$merge_base" "$HEAD_SHA" "$AUTHOR" 2>&1)"; then
+          verdict=""
+          details=""
+          for attempt in 1 2 3 4 5; do
+            git fetch -q --no-tags origin "$BASE"
+            tip="$(git rev-parse "origin/$BASE")"
+            if ! tree="$(git merge-tree --write-tree "$tip" "$HEAD_SHA" 2>/dev/null)"; then
+              verdict=rejected
+              details="It conflicts with what's already in the registry. Run zorvok trunk push again to rebuild it on the latest registry."
+              break
+            fi
+            merged="$(git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit-tree "$tree" -p "$tip" -p "$HEAD_SHA" -m "Publish #$PR by @$AUTHOR")"
+            if ! out="$("$tools/validate-pr.sh" "$tip" "$merged" "$AUTHOR_ID" 2>&1)"; then
+              verdict=rejected
+              details="$out"
+              break
+            fi
+            if ! out="$("$tools/publish-policy.sh" "$tip" "$merged" "$AUTHOR_ID" "$AUTHOR" 2>&1)"; then
+              verdict=rejected
+              details="$out"
+              break
+            fi
+            # A plain push only succeeds as a fast-forward from $tip, so
+            # exactly the commit just checked is what gets published.
+            if git push -q origin "$merged:refs/heads/$BASE"; then
+              verdict=published
+              break
+            fi
+            sleep $((attempt * 3)) # main moved: check again on its new tip
+          done
+          if [ -z "$verdict" ]; then
             verdict=rejected
-            details="$out"
-          elif ! out="$("$tools/publish-policy.sh" "$merge_base" "$HEAD_SHA" "$AUTHOR" 2>&1)"; then
-            verdict=rejected
-            details="$out"
-          elif ! out="$(gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD_SHA" 2>&1)"; then
-            verdict=rejected
-            details="It couldn't be merged: $out. Run zorvok trunk push again to retry."
-          elif ! "$tools/push-index.sh" "$BASE" "$GITHUB_WORKSPACE"; then
-            # Merged, but the index push kept losing races or failing:
-            # hand it to regenerate-index.yml (a workflow_dispatch from
-            # this token does start a run), which rebuilds from main.
-            gh workflow run regenerate-index.yml --repo "$GITHUB_REPOSITORY" --ref "$BASE"
-            details="Published. The index is still being rebuilt, so it can take up to 10 minutes to show up everywhere."
+            details="The registry was busy publishing other pods. Run zorvok trunk push again."
           fi
 
-          printf '<!-- zorvok-publish sha=%s verdict=%s -->\n%s\n' "$HEAD_SHA" "$verdict" "$details" > "$RUNNER_TEMP/verdict.md"
+          note="It can take up to 5 minutes to show up everywhere."
+          if [ "$verdict" = published ] && ! "$tools/push-index.sh" "$BASE" "$GITHUB_WORKSPACE"; then
+            # The index push kept losing races or failing: hand it to
+            # regenerate-index.yml (a workflow_dispatch from this token does
+            # start a run), which rebuilds from main.
+            gh workflow run regenerate-index.yml --repo "$GITHUB_REPOSITORY" --ref "$BASE"
+            note="The index is still being rebuilt, so it can take up to 10 minutes to show up everywhere."
+          fi
+
+          {
+            printf '<!-- zorvok-publish sha=%s verdict=%s -->\n' "$HEAD_SHA" "$verdict"
+            if [ "$verdict" = published ]; then
+              printf 'Published. %s\n' "$note"
+            else
+              # Quoted as an indented code block, so nothing from the pull
+              # request or from CocoaPods trunk renders as links or mentions.
+              printf "This can't be published:\n\n"
+              printf '%s\n' "$details" | tr -d '\000-\010\013\014\016-\037\177' | sed 's/^/    /'
+            fi
+          } > "$RUNNER_TEMP/verdict.md"
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
           # Nobody reviews pull requests here, so a rejected one is closed
           # rather than left waiting; `zorvok trunk push` opens a fresh one
