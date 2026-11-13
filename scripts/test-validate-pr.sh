@@ -123,6 +123,13 @@ setup_malformed_json() {
 }
 run_case "malformed JSON podspec" "1001" "fail" setup_malformed_json
 
+# 6b. A second JSON document after a valid one — should fail.
+setup_two_documents() {
+  mkdir -p Specs/ExistingPod/2.0.0
+  printf '{"name": "ExistingPod", "version": "2.0.0"}\n{"name": "Other"}\n' > Specs/ExistingPod/2.0.0/ExistingPod.podspec.json
+}
+run_case "a podspec file holding two JSON documents" "1001" "fail" setup_two_documents
+
 # 7. Brand-new pod, first publish, with its own OWNERS — should pass.
 setup_new_pod() {
   mkdir -p Specs/BrandNewPod/1.0.0

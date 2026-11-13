@@ -6,32 +6,26 @@
 # registries; this one has to, or anyone could claim `Alamofire` here
 # before its authors do.
 #
-# All the evidence comes from CocoaPods trunk and GitHub, never from the
-# pull request: trunk's API lists the pod's owners (by email) and when
-# each version was published, and the latest podspec published there
-# names the pod's repository. The publisher, identified by their numeric
-# GitHub user ID, may publish the pod if any one of these holds:
+# Trunk knows a pod's owners only by the emails they registered with `pod
+# trunk register`, and it lets you act as an owner by proving you control
+# one of those emails. This checks the same thing, through what GitHub has
+# verified about the publisher's account (identified by its numeric user
+# ID), never through anything in the pull request:
 #
 #   1. their GitHub profile's public email is one of the pod's trunk owner
-#      emails (GitHub only lets a verified address be public);
+#      emails (GitHub only lets a verified address be public); or
 #   2. GitHub credits their account with commits to the pod's GitHub
-#      repository made with one of those emails (it only credits an
-#      account with commits whose email belongs to it, so this works with
-#      a hidden email too);
-#   3. that repository is owned by their account, and both the account
-#      and the repository already existed when trunk published the
-#      version that points to them;
-#   4. that repository's default branch has a `.zorvok-owners` file
-#      listing their GitHub user ID (or username), and the repository and
-#      its owner already existed when trunk published that version.
+#      repository made with one of those emails. GitHub credits a commit
+#      only to the account that has verified its email, so this works with
+#      a hidden email too, and anyone else's commits made with that email
+#      are credited to the owner, not to them.
 #
-# 1 and 2 prove the publisher is a trunk owner. 3 and 4 prove they
-# control what the trunk owners published. The age checks are what stop
-# a namespace takeover: someone who registers a deleted account's freed
-# username, or recreates a renamed repository, gets a newer creation date
-# than the trunk release and doesn't pass. Proofs that can't be protected
-# that way (membership of a large organization, a file on a homepage
-# whose domain can lapse) are deliberately not accepted.
+# Owning, or controlling a file in, the repository a podspec points to is
+# deliberately not accepted. GitHub doesn't say who held a username in
+# the past, so after an owner renames or deletes their account, someone
+# else can rename an old account and an old repository of their own into
+# the freed names, and no creation date tells them apart. A file on a
+# homepage isn't accepted either: its domain can lapse.
 #
 # A name that differs only in letter case from a trunk pod is refused. A
 # name that isn't on CocoaPods trunk at all needs no evidence: its first
@@ -41,12 +35,9 @@
 # Exits 0 if the user may publish <name> (saying why), 1 if not (saying
 # how to prove it), 2 if CocoaPods trunk couldn't be checked.
 #
-# Only reads: fetches over HTTPS (no globbing, no other protocols, size
-# capped) and makes a shallow, blob-less clone of a github.com repository,
-# never running anything from it. Test overrides: TRUNK_CDN_URL,
-# TRUNK_API_URL, GITHUB_API_URL, GITHUB_SERVER_URL (GitHub Actions sets
-# the last two to the real services; the defaults below match),
-# GIT_ALLOW_PROTOCOL and ZORVOK_FETCH_PROTO. GH_TOKEN, if set,
+# Only reads, over HTTPS (no globbing, no other protocols, time and size
+# capped). Test overrides: TRUNK_CDN_URL, TRUNK_API_URL, GITHUB_API_URL,
+# ZORVOK_FETCH_PROTO and ZORVOK_MIN_TRUNK_PODS. GH_TOKEN, if set,
 # authenticates GitHub API calls.
 
 set -euo pipefail
@@ -57,10 +48,11 @@ LOGIN="${3:?usage: verify-trunk-owner.sh <name> <github-user-id> <github-usernam
 TRUNK_CDN_URL="${TRUNK_CDN_URL:-https://cdn.cocoapods.org}"
 TRUNK_API_URL="${TRUNK_API_URL:-https://trunk.cocoapods.org/api/v1}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
-GITHUB_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
 FETCH_PROTO="${ZORVOK_FETCH_PROTO:-=https}"
-export GIT_ALLOW_PROTOCOL="${GIT_ALLOW_PROTOCOL:-https}"
-export GIT_TERMINAL_PROMPT=0
+# CocoaPods trunk lists over 100,000 pods. A list much shorter than that
+# is a broken or truncated answer, and trusting it would let anyone claim
+# a trunk pod's name, so it counts as trunk not being reachable.
+MIN_TRUNK_PODS="${ZORVOK_MIN_TRUNK_PODS:-50000}"
 
 # Everything below goes into URLs; refuse anything outside the expected
 # characters rather than escape it.
@@ -69,7 +61,6 @@ export GIT_TERMINAL_PROMPT=0
 [[ "$LOGIN" =~ ^[A-Za-z0-9-]+$ ]] || { echo "\"$LOGIN\" isn't a GitHub username"; exit 1; }
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-LOGIN_LC="$(lower "$LOGIN")"
 
 md5_hex() {
   if command -v md5sum >/dev/null 2>&1; then
@@ -99,24 +90,14 @@ github_repo() {
   fi
 }
 
-# epoch <ISO-8601 timestamp>: seconds since 1970, or nothing.
-epoch() {
-  [ -n "$1" ] && jq -rn --arg t "$1" '$t | fromdateiso8601' 2>/dev/null || true
-}
-
-with_timeout() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 120 "$@"
-  else
-    "$@"
-  fi
+unreachable() {
+  echo "CocoaPods trunk couldn't be checked for $NAME"
+  exit 2
 }
 
 # --- Is the name on trunk, in any letter case? ---
-if ! all_pods="$(fetch "$TRUNK_CDN_URL/all_pods.txt")"; then
-  echo "CocoaPods trunk couldn't be checked for $NAME"
-  exit 2
-fi
+all_pods="$(fetch "$TRUNK_CDN_URL/all_pods.txt")" || unreachable
+[ "$(grep -c . <<<"$all_pods" || true)" -ge "$MIN_TRUNK_PODS" ] || unreachable
 trunk_name="$(awk -v n="$(lower "$NAME")" 'tolower($0) == n { print; exit }' <<<"$all_pods")"
 if [ -z "$trunk_name" ]; then
   echo "$NAME isn't on CocoaPods trunk, so its first publisher here owns it"
@@ -127,105 +108,58 @@ if [ "$trunk_name" != "$NAME" ]; then
   exit 1
 fi
 
-# --- Its latest podspec, and when trunk published that version ---
+# --- Its owners, and the podspec trunk published most recently ---
 hash="$(md5_hex "$NAME")"
-if ! index="$(fetch "$TRUNK_CDN_URL/all_pods_versions_${hash:0:1}_${hash:1:1}_${hash:2:1}.txt")" ||
-  ! line="$(awk -F/ -v n="$NAME" '$1 == n' <<<"$index")" || [ -z "$line" ]; then
-  echo "CocoaPods trunk couldn't be checked for $NAME"
-  exit 2
-fi
-latest="$(tr '/' '\n' <<<"$line" | tail -n +2 | sort -V | tail -n 1)"
-if ! spec="$(fetch "$TRUNK_CDN_URL/Specs/${hash:0:1}/${hash:1:1}/${hash:2:1}/$NAME/$latest/$NAME.podspec.json")" ||
-  ! pod_info="$(fetch "$TRUNK_API_URL/pods/$NAME")"; then
-  echo "CocoaPods trunk couldn't be checked for $NAME"
-  exit 2
-fi
+index="$(fetch "$TRUNK_CDN_URL/all_pods_versions_${hash:0:1}_${hash:1:1}_${hash:2:1}.txt")" || unreachable
+line="$(awk -F/ -v n="$NAME" '$1 == n' <<<"$index")"
+[ -n "$line" ] || unreachable
+pod_info="$(fetch "$TRUNK_API_URL/pods/$NAME")" || unreachable
+cdn_versions="$(tr '/' '\n' <<<"$line" | tail -n +2)"
+# The version trunk published last, by trunk's own timestamps, among those
+# still on its CDN: its podspec names the pod's current repository. (A
+# version sort would pick a prerelease like 2.0.0-beta.1 over 2.0.0, even
+# one published years earlier from a repository the pod has since left.)
+latest="$(jq -r --arg cdn "$cdn_versions" '
+  ($cdn | split("\n")) as $on
+  | [.versions[]? | select(.name as $n | any($on[]; . == $n))]
+  | sort_by(.created_at) | last | .name // empty' <<<"$pod_info" 2>/dev/null || true)"
+[ -n "$latest" ] || latest="$(sort -V <<<"$cdn_versions" | tail -n 1)"
+spec="$(fetch "$TRUNK_CDN_URL/Specs/${hash:0:1}/${hash:1:1}/${hash:2:1}/$NAME/$latest/$NAME.podspec.json")" || unreachable
 git_url="$(jq -r '.source.git // empty' <<<"$spec" 2>/dev/null || true)"
 homepage="$(jq -r '.homepage // empty' <<<"$spec" 2>/dev/null || true)"
 owner_emails="$(jq -r '.owners[]?.email // empty' <<<"$pod_info" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-released="$(jq -r --arg v "$latest" '[.versions[]? | select(.name == $v) | .created_at][0] // empty | sub(" UTC$"; "Z") | sub(" "; "T")' <<<"$pod_info" 2>/dev/null || true)"
-released_at="$(epoch "$released")"
 
 is_owner_email() {
   [ -n "$1" ] && [ -n "$owner_emails" ] && grep -qxF "$(lower "$1")" <<<"$owner_emails"
 }
-# predates_release <ISO-8601 timestamp>: was it created before trunk published $latest?
-predates_release() {
-  local t
-  t="$(epoch "$1")"
-  [ -n "$t" ] && [ -n "$released_at" ] && [ "$t" -lt "$released_at" ]
-}
-
-user="$(github_api "user/$AUTHOR_ID" 2>/dev/null || true)"
 
 # --- 1. Their public email is a trunk owner's ---
+user="$(github_api "user/$AUTHOR_ID" 2>/dev/null || true)"
 if [ -n "$user" ] && is_owner_email "$(jq -r '.email // empty' <<<"$user")"; then
   echo "$LOGIN's public GitHub email is an owner of $NAME on CocoaPods trunk"
   exit 0
 fi
 
+# --- 2. GitHub credits them with commits made with a trunk owner's email ---
 repo="$(github_repo "$git_url")"
 [ -z "$repo" ] && repo="$(github_repo "$homepage")"
-repo_info=""
 if [ -n "$repo" ] && repo_info="$(github_api "repos/$repo" 2>/dev/null)"; then
   # A renamed or transferred repository answers under its new name.
   full_name="$(jq -r '.full_name // empty' <<<"$repo_info")"
   [[ "$full_name" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && repo="$full_name"
-fi
-
-# --- 2. GitHub credits them with commits made with a trunk owner's email ---
-if [ -n "$repo_info" ] && commits="$(github_api "repos/$repo/commits?author=$LOGIN&per_page=100" 2>/dev/null)"; then
-  while IFS= read -r email; do
-    if is_owner_email "$email"; then
-      echo "GitHub credits $LOGIN with commits to github.com/$repo made with the email of an owner of $NAME on CocoaPods trunk"
-      exit 0
-    fi
-  done < <(jq -r --argjson id "$AUTHOR_ID" '.[]? | select(.author.id? == $id) | .commit.author.email // empty' <<<"$commits" 2>/dev/null || true)
-fi
-
-# --- 3 & 4 need a repository that predates the trunk release ---
-genuine=false
-if [ -n "$repo_info" ]; then
-  owner_id="$(jq -r '.owner.id // empty' <<<"$repo_info")"
-  owner_login="$(jq -r '.owner.login // empty' <<<"$repo_info")"
-  if [ "$owner_id" = "$AUTHOR_ID" ]; then
-    owner_created="$(jq -r '.created_at // empty' <<<"$user")"
-  elif [[ "$owner_login" =~ ^[A-Za-z0-9-]+$ ]]; then
-    owner_created="$(github_api "users/$owner_login" 2>/dev/null | jq -r '.created_at // empty' 2>/dev/null || true)"
-  else
-    owner_created=""
-  fi
-  if predates_release "$(jq -r '.created_at // empty' <<<"$repo_info")" && predates_release "$owner_created"; then
-    genuine=true
-  fi
-
-  # --- 3. They own the repository ---
-  if [ "$genuine" = true ] && [ "$owner_id" = "$AUTHOR_ID" ]; then
-    echo "$LOGIN owns github.com/$repo, the repository CocoaPods trunk's $NAME $latest points to, and both predate that release"
-    exit 0
-  fi
-
-  # --- 4. The repository lists them in .zorvok-owners ---
-  if [ "$genuine" = true ]; then
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    if with_timeout git clone -q --depth 1 --filter=blob:none --no-checkout -- "$GITHUB_SERVER_URL/$repo.git" "$tmp/repo" >/dev/null 2>&1 &&
-      git -C "$tmp/repo" show HEAD:.zorvok-owners 2>/dev/null |
-      sed 's/#.*//' | awk 'NF { print tolower($1) }' | grep -xF -e "$AUTHOR_ID" -e "$LOGIN_LC" >/dev/null; then
-      echo "github.com/$repo lists $LOGIN in .zorvok-owners"
-      exit 0
-    fi
+  if commits="$(github_api "repos/$repo/commits?author=$LOGIN&per_page=100" 2>/dev/null)"; then
+    while IFS= read -r email; do
+      if is_owner_email "$email"; then
+        echo "GitHub credits $LOGIN with commits to github.com/$repo made with the email of an owner of $NAME on CocoaPods trunk"
+        exit 0
+      fi
+    done < <(jq -r --argjson id "$AUTHOR_ID" '.[]? | select(.author.id? == $id) | .commit.author.email // empty' <<<"$commits" 2>/dev/null || true)
   fi
 fi
 
-echo "$NAME already exists on CocoaPods trunk, and only its owners there can publish it here; $LOGIN couldn't be matched to one. Any one of these proves it, checked automatically the next time you run zorvok trunk push:"
-echo "  - make the email you registered with \`pod trunk register\` the public email on your GitHub profile"
-if [ -n "$repo_info" ]; then
-  if [ "$genuine" = true ]; then
-    echo "  - publish from the GitHub account that owns github.com/$repo"
-    echo "  - add a file named .zorvok-owners containing your GitHub user ID ($AUTHOR_ID) to the default branch of github.com/$repo"
-  else
-    echo "  - (github.com/$repo, or the account that owns it, was created after CocoaPods trunk published $NAME $latest, so it can't vouch for the pod)"
-  fi
+echo "$NAME already exists on CocoaPods trunk, and only its owners there can publish it here; $LOGIN couldn't be matched to one. Trunk knows its owners by the email they registered with \`pod trunk register\`. Show GitHub you have that email, in either of these ways, and run zorvok trunk push again:"
+echo "  - add it to your GitHub account (Settings → Emails) and choose it as your public profile email"
+if [ -n "$repo" ]; then
+  echo "  - or, if you've committed to github.com/$repo with it, just add it to your GitHub account: GitHub then credits those commits to you, and it can stay private"
 fi
 exit 1

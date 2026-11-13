@@ -13,17 +13,20 @@ name: Publish
 #      publisher is one of its owners there (scripts/verify-trunk-owner.sh).
 #
 # Both judge the pull request as it would land on the registry's CURRENT
-# tip: the workflow builds that exact merge commit itself (git merge-tree,
-# without touching the working tree), checks it against the tip, and
-# publishes it by pushing it as a fast-forward. The commit the pull request
-# happens to be based on is never what gets checked, because its author
-# chooses it (an older base would otherwise let a removed owner publish).
-# If main moves while a run is checking, the fast-forward push fails and
-# the checks run again on the new tip. A push made with this workflow's
-# token doesn't trigger regenerate-index.yml, so the index files are
-# regenerated in the same job. Every run ends with a comment whose first
-# line is a machine-readable verdict on the exact commit it judged;
-# `zorvok trunk push` waits for that comment.
+# tip: the workflow merges it onto the tip itself (git merge-tree, without
+# touching the working tree), commits the resulting files with the tip as
+# the only parent, checks that commit against the tip, and publishes it by
+# pushing it as a fast-forward. The commit the pull request happens to be
+# based on is never what gets checked, because its author chooses it (an
+# older base would otherwise let a removed owner publish), and none of the
+# pull request's own commits enter the registry's history: only the files
+# that were checked do. If main moves while a run is checking, the
+# fast-forward push fails and the checks run again on the new tip. A push
+# made with this workflow's token doesn't trigger regenerate-index.yml, so
+# the index files are regenerated in the same job. Every run ends with a
+# comment whose first line is a machine-readable verdict on the exact
+# commit it judged, which `zorvok trunk push` waits for, and then closes
+# the pull request, published or not.
 #
 # Security: pull_request_target runs with this repository's write token, so
 # nothing from the pull request may ever run. The job checks out the base
@@ -33,12 +36,15 @@ name: Publish
 # data from CocoaPods trunk and GitHub. Nothing from the pull request is
 # interpolated into a script: every value reaches the shell through env,
 # and the verdict comment quotes details as a code block with control
-# characters removed. The checkout action is pinned to a commit.
+# characters (carriage returns included) removed. Only the pull request's
+# author may update it: a push by anyone else is judged as theirs, so it's
+# rejected. The checkout action is pinned to a commit.
 #
 # NOTE: like regenerate-index.yml, this YAML hasn't run on real GitHub
 # Actions yet; the scripts it calls are tested locally
-# (scripts/test-validate-pr.sh, scripts/test-publish-policy.sh). Watch the
-# first real publish's run.
+# (scripts/test-validate-pr.sh, scripts/test-publish-policy.sh), and
+# scripts/test-publish-workflow.sh runs this job's script on simulated pull
+# requests. Watch the first real publish's run.
 
 on:
   # pull_request_target is what gives a fork's pull request a token that
@@ -46,6 +52,7 @@ on:
   # request ever runs (see Security above).
   pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, synchronize, reopened]
+    branches: [main]
     paths:
       - "Specs/**"
 
@@ -66,13 +73,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # to push the published entry and the index to main
-      pull-requests: write # to comment the verdict, and close a rejected pull request
+      pull-requests: write # to comment the verdict, then close the pull request
       actions: write # to start regenerate-index.yml if this job can't push the index
     env:
       GH_TOKEN: ${{ github.token }}
       PR: ${{ github.event.pull_request.number }}
       AUTHOR: ${{ github.event.pull_request.user.login }}
       AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+      SENDER_ID: ${{ github.event.sender.id }} # who opened, pushed to or reopened it
       BASE: ${{ github.event.pull_request.base.ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
@@ -101,7 +109,14 @@ jobs:
 
           verdict=""
           details=""
+          if [ "$SENDER_ID" != "$AUTHOR_ID" ]; then
+            # Everything below is judged as the author's; a push or reopen
+            # by someone else (a collaborator on the fork, say) isn't theirs.
+            verdict=rejected
+            details="Only the pull request's author can update it, and someone else just did. Run zorvok trunk push again to open a fresh one."
+          fi
           for attempt in 1 2 3 4 5; do
+            [ -n "$verdict" ] && break
             git fetch -q --no-tags origin "$BASE"
             tip="$(git rev-parse "origin/$BASE")"
             if ! tree="$(git merge-tree --write-tree "$tip" "$HEAD_SHA" 2>/dev/null)"; then
@@ -109,8 +124,11 @@ jobs:
               details="It conflicts with what's already in the registry. Run zorvok trunk push again to rebuild it on the latest registry."
               break
             fi
+            # The tip is the only parent: the pull request's own commits,
+            # and anything hidden in their history, never become part of
+            # the registry; only the files checked below do.
             merged="$(git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit-tree "$tree" -p "$tip" -p "$HEAD_SHA" -m "Publish #$PR by @$AUTHOR")"
+              commit-tree "$tree" -p "$tip" -m "Publish #$PR by @$AUTHOR (GitHub user $AUTHOR_ID)")"
             if ! out="$("$tools/validate-pr.sh" "$tip" "$merged" "$AUTHOR_ID" 2>&1)"; then
               verdict=rejected
               details="$out"
@@ -151,16 +169,14 @@ jobs:
               # Quoted as an indented code block, so nothing from the pull
               # request or from CocoaPods trunk renders as links or mentions.
               printf "This can't be published:\n\n"
-              printf '%s\n' "$details" | tr -d '\000-\010\013\014\016-\037\177' | sed 's/^/    /'
+              printf '%s\n' "$details" | tr -d '\000-\010\013-\037\177' | sed 's/^/    /'
             fi
           } > "$RUNNER_TEMP/verdict.md"
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
-          # Nobody reviews pull requests here, so a rejected one is closed
-          # rather than left waiting; `zorvok trunk push` opens a fresh one
-          # on the next attempt.
-          if [ "$verdict" = rejected ]; then
-            gh pr close "$PR" --repo "$GITHUB_REPOSITORY" || true
-          fi
+          # Its files are in main now (published), or nobody would ever
+          # merge it (rejected); either way it's done. `zorvok trunk push`
+          # opens a fresh one on the next attempt.
+          gh pr close "$PR" --repo "$GITHUB_REPOSITORY" || true
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
 
       - name: Report an unexpected failure

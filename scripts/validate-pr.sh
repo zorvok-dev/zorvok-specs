@@ -104,13 +104,16 @@ while IFS=$'\t' read -r status path; do
     fi
 
     content="$(git show "$HEAD_REF:$path" 2>/dev/null || true)"
-    if ! echo "$content" | jq -e . >/dev/null 2>&1; then
-      errors+=("structure: $path is not valid JSON")
+    # Exactly one JSON object: jq reads a stream of documents, so a second
+    # one after the first would otherwise be checked by nothing here, while
+    # a lenient reader might use it.
+    if ! jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$content"; then
+      errors+=("structure: $path is not a single JSON object")
       continue
     fi
 
-    spec_name="$(echo "$content" | jq -r '.name // empty')"
-    spec_version="$(echo "$content" | jq -r '.version // empty')"
+    spec_name="$(jq -r '.name // empty' <<<"$content")"
+    spec_version="$(jq -r '.version // empty' <<<"$content")"
     if [ "$spec_name" != "$name" ]; then
       errors+=("structure: $path — podspec \"name\" ($spec_name) does not match its path ($name)")
     fi

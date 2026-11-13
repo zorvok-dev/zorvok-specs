@@ -110,7 +110,10 @@ done
 for v in ${versions[@]+"${versions[@]}"}; do
   name="${v%%/*}"
   version="${v#*/}"
-  if git show "$HEAD_REF:Specs/$name/$version/$name.podspec.json" | jq -e 'has("prepare_command")' >/dev/null 2>&1; then
+  spec="$(git show "$HEAD_REF:Specs/$name/$version/$name.podspec.json" 2>/dev/null || true)"
+  if ! jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$spec"; then
+    reasons+=("$name $version's podspec must be a single JSON object")
+  elif jq -e 'has("prepare_command")' >/dev/null 2>&1 <<<"$spec"; then
     reasons+=("$name $version uses prepare_command, which runs shell commands on every machine that installs it; CocoaPods trunk doesn't accept it either")
   fi
 done
