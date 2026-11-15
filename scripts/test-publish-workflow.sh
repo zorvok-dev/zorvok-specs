@@ -23,6 +23,8 @@
 #   9. carriage returns in a rejected OWNERS line never reach the comment
 #
 # Usage: scripts/test-publish-workflow.sh   (needs git, jq, curl, ruby)
+# The expected comments below contain markdown backticks, not commands.
+# shellcheck disable=SC2016
 set -uo pipefail
 
 SPECS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,12 +52,17 @@ git commit -q -m seed
 git push -q origin main
 
 mkdir -p "$W/bin" "$W/comments"
+# GitHub's current usernames, by user ID, for `gh api user/<id> --jq .login`.
 cat > "$W/bin/gh" <<EOF
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "pr comment") cp "\${@: -1}" "$W/comments/pr-\$3.md" ;;
   "pr close") echo "\$3" >> "$W/closed" ;;
   "workflow run") echo "\$*" >> "$W/workflow-runs" ;;
+  "api user/1001") echo alice ;;
+  "api user/1002") echo bob ;;
+  "api user/9001") echo mallory ;;
+  "api user/1019875") echo onevcat ;;
   *) echo "stand-in gh: unexpected \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -126,11 +133,19 @@ judge() {
   fi
 }
 
-s=$(open_pr 1 "" 'spec ZorvokTestFreshPod 1.0.0; echo "1002 bob" > Specs/ZorvokTestFreshPod/OWNERS')
-judge 1 bob 1002 "$s" published "a new pod that isn't on trunk"
+# alice is listed under a username she has since changed: the mention
+# must use her current one.
+s=$(open_pr 1 "" 'spec ZorvokTestFreshPod 1.0.0; printf "1002 bob\n1001 alice-before-rename\n" > Specs/ZorvokTestFreshPod/OWNERS')
+judge 1 bob 1002 "$s" published "a new pod that isn't on trunk, announced to its owners" \
+  '@bob published `ZorvokTestFreshPod 1.0.0`. cc @alice'
+if grep -q "alice-before-rename" "$W/comments/pr-1.md"; then
+  echo "FAIL - pull request 1's announcement mentions a stale username"
+  fail=$((fail + 1))
+fi
 before_removal="$(git --git-dir="$W/origin.git" rev-parse main)"
 s=$(open_pr 2 "" 'printf "1001 alice\n" > Specs/ExistingPod/OWNERS')
-judge 2 alice 1001 "$s" published "an owner removes a co-owner"
+judge 2 alice 1001 "$s" published "an owner removes a co-owner" \
+  '@alice updated the owners of `ExistingPod`.'
 s=$(open_pr 3 "$before_removal" 'spec ExistingPod 2.0.0')
 judge 3 mallory 9001 "$s" rejected "the removed co-owner publishes from a branch made before the removal" \
   "GitHub user 9001 is not listed in Specs/ExistingPod/OWNERS"
@@ -138,13 +153,15 @@ s=$(open_pr 4 "" 'spec Kingfisher 99.0.0; echo "583231 octocat" > Specs/Kingfish
 judge 4 octocat 583231 "$s" rejected "someone who isn't Kingfisher's trunk owner claims it" \
   "only its owners there can publish it here"
 s=$(open_pr 5 "" 'spec Kingfisher 99.0.0; echo "1019875 onevcat" > Specs/Kingfisher/OWNERS')
-judge 5 onevcat 1019875 "$s" published "Kingfisher's trunk owner claims it"
+judge 5 onevcat 1019875 "$s" published "Kingfisher's trunk owner claims it" \
+  '@onevcat published `Kingfisher 99.0.0`.'
 s=$(open_pr 6 "" 'printf "1001 alice\n9001 mallory\n" > Specs/ExistingPod/OWNERS')
 judge 6 mallory 9001 "$s" rejected "the removed co-owner re-adds themselves to OWNERS" \
   "only a current owner of ExistingPod can change Specs/ExistingPod/OWNERS"
 hidden="$(printf 'not a podspec\n' | git hash-object --stdin)"
 s=$(open_pr 7 "" 'printf "not a podspec\n" > hidden.bin; git add -A; git commit -q -m hide; git rm -q hidden.bin; spec ZorvokTestFreshPod 1.1.0')
-judge 7 bob 1002 "$s" published "a publish whose history hides a file it later deletes"
+judge 7 bob 1002 "$s" published "a publish whose history hides a file it later deletes" \
+  '@bob published `ZorvokTestFreshPod 1.1.0`. cc @alice'
 if git --git-dir="$W/origin.git" rev-list --objects main | grep -q "^$hidden"; then
   echo "FAIL - the file hidden in pull request 7's history is reachable from main"
   fail=$((fail + 1))

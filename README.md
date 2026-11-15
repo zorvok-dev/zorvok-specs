@@ -7,8 +7,7 @@ This repository *is* the registry: no server, no database, no hosting bill. A pu
 **Publish a pod** (details in [Publishing a package](#publishing-a-package)):
 
 ```bash
-gh auth login        # once
-zorvok trunk push    # in your pod's folder
+zorvok trunk push    # in your pod's folder; signs you in to GitHub the first time
 ```
 
 **Install one** (details in [Consuming this registry](#consuming-this-registry)):
@@ -115,14 +114,15 @@ curl https://raw.githubusercontent.com/zorvok-dev/zorvok-specs/main/Specs/<PodNa
 Publishing is one command, like `pod trunk push`, and it's fully automatic: no maintainer reviews anything. Only the podspec goes into this registry; your pod's code, frameworks and xcframeworks stay wherever its `source` points.
 
 ```bash
-gh auth login        # once: publishing uses your GitHub account (or set GITHUB_TOKEN)
 cd /path/to/your/pod
 zorvok trunk push    # or: zorvok trunk push MyPod.podspec
 ```
 
+Publishing uses your GitHub account. The first time, `zorvok trunk push` signs you in through the GitHub CLI (`brew install gh` if you don't have it): you enter a one-time code in the browser and click Authorize. In CI, set `GITHUB_TOKEN` instead.
+
 `zorvok trunk push` lints the podspec and converts it to JSON with `pod ipc spec`; this registry stores only that evaluated JSON, never Ruby, so nothing here is ever executed. It opens a pull request from your fork that adds `Specs/<PodName>/<version>/<PodName>.podspec.json`, plus `Specs/<PodName>/OWNERS` listing your GitHub user ID and username on a pod's first publish. Then it waits, usually about a minute, for [the publish workflow](.github/workflows/publish.yml) to decide:
 
-- **Published.** It passed every rule below, so the workflow added its files to `main` and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long).
+- **Published.** It passed every rule below, so the workflow added its files to `main` and regenerated the index. It's installable within 5 minutes (GitHub caches these files that long). The verdict comment @mentions you and the pod's other owners, so GitHub emails each of you (to the address you verified with GitHub, if your notification settings send email for mentions, as they do by default).
 - **Rejected.** `zorvok trunk push` prints exactly why. Fix it and run `zorvok trunk push` again.
 
 Either way the workflow then closes the pull request. It publishes the checked files as its own commit, never the pull request's commits, so a published pull request shows as closed, not merged; its verdict comment says which it was.

@@ -165,6 +165,29 @@ jobs:
             printf '<!-- zorvok-publish sha=%s verdict=%s -->\n' "$HEAD_SHA" "$verdict"
             if [ "$verdict" = published ]; then
               printf 'Published. %s\n' "$note"
+              # GitHub emails everyone a comment @mentions (by default, to
+              # their verified address): the author, and the pod's other
+              # owners under their usernames as of now, looked up by ID,
+              # since an OWNERS username can be stale and since taken by
+              # someone else. The pod name and versions come from paths
+              # validate-pr.sh already limited to safe characters.
+              pod="$(git diff --no-renames --name-only "$tip" "$merged" -- Specs/ | cut -d/ -f2 | head -n 1)"
+              versions="$(git diff --no-renames --name-only --diff-filter=A "$tip" "$merged" -- "Specs/$pod/" |
+                grep '\.podspec\.json$' | cut -d/ -f3 | sort -V | paste -sd, - | sed 's/,/, /g' || true)"
+              cc=""
+              for id in $(git show "$merged:Specs/$pod/OWNERS" | sed 's/#.*//' | awk 'NF { print $1 }' | head -n 10); do
+                [ "$id" = "$AUTHOR_ID" ] && continue
+                login="$(gh api "user/$id" --jq .login 2>/dev/null || true)"
+                if [[ "$login" =~ ^[A-Za-z0-9-]+$ ]]; then
+                  cc="$cc @$login"
+                fi
+              done
+              # shellcheck disable=SC2016 # the backticks are markdown, not commands
+              if [ -n "$versions" ]; then
+                printf '\n@%s published `%s %s`.%s\n' "$AUTHOR" "$pod" "$versions" "${cc:+ cc$cc}"
+              else
+                printf '\n@%s updated the owners of `%s`.%s\n' "$AUTHOR" "$pod" "${cc:+ cc$cc}"
+              fi
             else
               # Quoted as an indented code block, so nothing from the pull
               # request or from CocoaPods trunk renders as links or mentions.
